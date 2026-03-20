@@ -20,4 +20,10 @@
 
 word_t expr(char *e, bool *success);
 
+
+void create_watchpoint(char *args);
+void delete_watchpoint(int no);
+void display_watchpoints();
+bool check_watchpoints();
+
 #endif

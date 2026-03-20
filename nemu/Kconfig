@@ -193,10 +193,19 @@ config DIFFTEST_REF_NAME
   default "none"
 endmenu
 
+config WATCHPOINT
+  bool "Enable watchpoint"
+  default y
+  help
+    Enable watchpoint feature. This will evaluate watchpoint expressions
+    after every instruction, which will significantly drop the performance.
+
 if MODE_SYSTEM
 source "src/memory/Kconfig"
 source "src/device/Kconfig"
 endif
+
+
 
 
 menu "Miscellaneous"

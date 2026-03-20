@@ -38,6 +38,17 @@ static void trace_and_difftest(Decode *_this, vaddr_t dnpc) {
 #endif
   if (g_print_step) { IFDEF(CONFIG_ITRACE, puts(_this->logbuf)); }
   IFDEF(CONFIG_DIFFTEST, difftest_step(_this->pc, dnpc));
+
+  #ifdef CONFIG_WATCHPOINT
+  // 引入我们刚才在 sdb.h 里声明的函数
+  extern bool check_watchpoints();
+  
+  // 如果发现有监视点的值发生了变化
+  if (check_watchpoints()) {
+    // 强制将 NEMU 的状态设为暂停
+    nemu_state.state = NEMU_STOP;
+  }
+  #endif
 }
 
 static void exec_once(Decode *s, vaddr_t pc) {
