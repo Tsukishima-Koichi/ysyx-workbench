@@ -15,6 +15,8 @@ void putch(char ch) {
 }
 
 void halt(int code) {
+  // 把 code 的值放入 a0 寄存器，然后执行 ebreak，最后陷入死循环以防万一
+  asm volatile("mv a0, %0; ebreak" : :"r"(code));
   while (1);
 }
 
