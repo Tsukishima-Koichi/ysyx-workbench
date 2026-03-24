@@ -52,12 +52,6 @@ extern "C" void pmem_write(int waddr, int wdata, char wmask) {
 // // ==================================================
 // // 2. 寄存器监控 DPI-C 接口
 // // ==================================================
-// uint32_t *cpu_gpr = NULL;
-
-// extern "C" void set_gpr_ptr(const svOpenArrayHandle a) {
-//     cpu_gpr = (uint32_t *)svGetArrayPtr(a);
-// }
-
 // 声明一个全局变量保存 Verilog 传来的身份证 (Scope)
 svScope regfile_scope = NULL;
 
@@ -140,7 +134,7 @@ int main(int argc, char** argv) {
     
     printf("--- CPU Simulation Start ---\n");
 
-    int max_cycles = 10000;
+    int max_cycles = 100000;
     int cycles = 0;
 
     // 仿真主循环
@@ -174,7 +168,7 @@ int main(int argc, char** argv) {
         }        
 
         // 定期打印观察日志
-        if (cycles % 1000 == 0) {
+        if (cycles < 100 || (cycles < 1000 && cycles % 100 == 0) || (cycles < 10000 && cycles % 1000 == 0)) {
             printf("Cycle %d: PC = 0x%08x, Inst = 0x%08x\n", cycles, top->pc, top->inst);
         }
     }

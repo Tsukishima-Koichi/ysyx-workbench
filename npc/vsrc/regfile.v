@@ -6,8 +6,8 @@ module regfile(
     input  [31:0] wdata,  // 要写入的数据
     input         wen,    // 写使能信号 (Write Enable)
     
-    output [31:0] rdata1,   // 读出的数据 1
-    output [31:0] rdata2    // 读出的数据 2
+    output [31:0] rs1_data,   // 读出的数据 1
+    output [31:0] rs2_data    // 读出的数据 2
 );
     // 定义 32 个 32 位的寄存器数组
     reg [31:0] rf [0:31];
@@ -26,8 +26,22 @@ module regfile(
     // 3. 导出读取函数
     export "DPI-C" function get_gpr;
 
-    function int get_gpr(input int idx);
-        get_gpr = rf[idx];
+    // function int get_gpr(input int idx);
+    //     get_gpr = rf[idx];
+    // endfunction
+
+    function int get_gpr;
+        input int idx;
+        begin
+            // 注意：这里的 rf 是你寄存器二维数组的名字。
+            // 如果你定义的数组叫 regs 或者 gpr，请把这里的 rf 替换成你的数组名！
+            // 为了安全起见，x0 寄存器永远返回 0
+            if (idx == 0) begin
+                get_gpr = 0;
+            end else begin
+                get_gpr = rf[idx]; 
+            end
+        end
     endfunction
     // ==================================================
 
@@ -45,6 +59,6 @@ module regfile(
     end
 
     // 读出逻辑 (组合逻辑，如果是 0 号寄存器直接输出 0，否则输出数组里的值)
-    assign rdata1 = (rs1 == 5'b0) ? 32'b0 : rf[rs1];
-    assign rdata2 = (rs2 == 5'b0) ? 32'b0 : rf[rs2];
+    assign rs1_data = (rs1 == 5'b0) ? 32'b0 : rf[rs1];
+    assign rs2_data = (rs2 == 5'b0) ? 32'b0 : rf[rs2];
 endmodule
