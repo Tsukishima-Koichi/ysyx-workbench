@@ -5,107 +5,168 @@
 
 #if !defined(__ISA_NATIVE__) || defined(__NATIVE_USE_KLIB__)
 
-int printf(const char *fmt, ...) {
-  panic("Not implemented");
-}
+// ======================================================================
+// 核心输出引擎：vsnprintf
+// 所有的 printf, sprintf, snprintf 最终都会调用这个函数。
+// 它安全地将解析出的字符写入缓冲区，并严格遵守最大长度 n 的限制。
+// ======================================================================
+int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
+  size_t count = 0;
+  
+  // 辅助宏：向缓冲区安全地写入一个字符。
+  // 即便超出了 n，也会继续计数（返回正确的总长度），但不会发生内存越界写。
+  #define PUT_CHAR(c) do { \
+    if (out != NULL && count < n - 1) { \
+      out[count] = (c); \
+    } \
+    count++; \
+  } while (0)
 
-int vsprintf(char *out, const char *fmt, va_list ap) {
-  panic("Not implemented");
-}
-
-int sprintf(char *out, const char *fmt, ...) {
-  // 1. 定义一个可变参数列表指针
-  va_list ap;
-  // 2. 初始化 ap，让它指向 fmt 之后的第一个参数
-  va_start(ap, fmt);
-
-  char *str = out; // 使用 str 指针遍历并写入目标数组 out
-
-  // 3. 逐个字符解析格式化字符串 fmt
-  for (; *fmt != '\0'; ++fmt) {
-    // 如果不是 '%'，说明是普通字符，直接原样复制
+  for (; *fmt != '\0'; fmt++) {
     if (*fmt != '%') {
-      *str++ = *fmt;
+      PUT_CHAR(*fmt);
       continue;
     }
 
-    // 遇到 '%'，看下一个字符是什么
-    ++fmt;
+    fmt++; // 跳过 '%'
+    
+    // 1. 解析格式修饰符：是否补 0，以及输出宽度 (例如 "%08x" 中的 '0' 和 '8')
+    int width = 0;
+    char padc = ' ';
+    if (*fmt == '0') {
+      padc = '0';
+      fmt++;
+    }
+    while (*fmt >= '0' && *fmt <= '9') {
+      width = width * 10 + (*fmt - '0');
+      fmt++;
+    }
 
+    // 2. 解析类型
     switch (*fmt) {
-      case 's': { // 处理字符串 (%s)
-        // 从可变参数列表中提取下一个类型为 char* 的参数
-        char *s = va_arg(ap, char *);
-        // 逐个字符复制，直到遇到字符串结束符 '\0'
-        while (*s != '\0') {
-          *str++ = *s++;
+      case 'd': 
+      case 'i': { // 有符号十进制
+        int val = va_arg(ap, int);
+        unsigned int uval;
+        if (val < 0) {
+          PUT_CHAR('-');
+          uval = (unsigned int)(~val + 1); // 安全取反加一
+        } else {
+          uval = (unsigned int)val;
         }
+        
+        char buf[32];
+        int i = 0;
+        if (uval == 0) buf[i++] = '0';
+        while (uval > 0) {
+          buf[i++] = '0' + (uval % 10);
+          uval /= 10;
+        }
+        while (i < width && i < 32) buf[i++] = padc; // 处理宽度填充
+        while (i > 0) PUT_CHAR(buf[--i]);
         break;
       }
       
-      case 'd': { // 处理十进制有符号整数 (%d)
-        // 提取下一个类型为 int 的参数
-        int num = va_arg(ap, int);
+      case 'u': 
+      case 'x': 
+      case 'X': 
+      case 'p': { // 无符号及十六进制
+        unsigned int val = va_arg(ap, unsigned int);
+        if (*fmt == 'p') {
+          PUT_CHAR('0');
+          PUT_CHAR('x');
+        }
+        int base = (*fmt == 'x' || *fmt == 'X' || *fmt == 'p') ? 16 : 10;
+        char *digits = (*fmt == 'X') ? "0123456789ABCDEF" : "0123456789abcdef";
         
-        // 处理负数的情况
-        unsigned int unum; // 使用无符号数处理，防止 -2147483648 取绝对值时溢出
-        if (num < 0) {
-          *str++ = '-';
-          unum = (unsigned int)(~num + 1); // 负数转正数的安全做法 (取反加一)
-        } else {
-          unum = (unsigned int)num;
+        char buf[32];
+        int i = 0;
+        if (val == 0) buf[i++] = '0';
+        while (val > 0) {
+          buf[i++] = digits[val % base];
+          val /= base;
         }
+        while (i < width && i < 32) buf[i++] = padc;
+        while (i > 0) PUT_CHAR(buf[--i]);
+        break;
+      }
 
-        // 处理数字 0 的特例
-        if (unum == 0) {
-          *str++ = '0';
-        } else {
-          char buf[32]; // 临时缓冲区，用来倒序存放数字字符
-          int i = 0;
-          // 剥离数字的每一位 (从低位到高位)
-          while (unum > 0) {
-            buf[i++] = (unum % 10) + '0'; // 取余数并转成 ASCII 字符
-            unum /= 10;
-          }
-          // 因为是从低位开始剥离的，所以要倒序写回 out 中
-          while (i > 0) {
-            *str++ = buf[--i];
-          }
+      case 's': { // 字符串
+        char *s = va_arg(ap, char *);
+        if (s == NULL) s = "(null)";
+        while (*s != '\0') {
+          PUT_CHAR(*s++);
         }
         break;
       }
 
-      case 'c': { // 处理单个字符 (%c) (备用)
-        // 在可变参数中，char 会被自动提升为 int，所以这里用 int 提取
+      case 'c': { // 单个字符
         char c = (char)va_arg(ap, int);
-        *str++ = c;
+        PUT_CHAR(c);
         break;
       }
 
-      default: { // 如果是不认识的格式符 (比如 %x，目前还没实现)
-        *str++ = '%';
-        *str++ = *fmt;
+      case '%': { // 转义的 %
+        PUT_CHAR('%');
+        break;
+      }
+
+      default: { // 不支持的格式符原样输出
+        PUT_CHAR('%');
+        if (*fmt) PUT_CHAR(*fmt);
+        else fmt--; // 防止字符串提前结束越界
         break;
       }
     }
   }
 
-  // 4. 极其重要：在字符串最后补上结束符 '\0'
-  *str = '\0';
+  // 3. 极其重要：补充字符串结束符
+  if (out != NULL && n > 0) {
+    out[count < n ? count : n - 1] = '\0';
+  }
 
-  // 5. 清理可变参数列表
+  #undef PUT_CHAR
+  return count;
+}
+
+// ======================================================================
+// 各种变体函数：它们全都只是套了一层壳，去调用上面的核心引擎
+// ======================================================================
+
+int vsprintf(char *out, const char *fmt, va_list ap) {
+  // 假设目标缓冲区无限大，传入 -1 转为无符号最大值
+  return vsnprintf(out, (size_t)-1, fmt, ap);
+}
+
+int sprintf(char *out, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int ret = vsprintf(out, fmt, ap);
   va_end(ap);
-
-  // 返回成功写入的字符总数 (不包含最后的 '\0')
-  return str - out;
+  return ret;
 }
 
 int snprintf(char *out, size_t n, const char *fmt, ...) {
-  panic("Not implemented");
+  va_list ap;
+  va_start(ap, fmt);
+  int ret = vsnprintf(out, n, fmt, ap);
+  va_end(ap);
+  return ret;
 }
 
-int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
-  panic("Not implemented");
+// 这是你在系统底层打印日志的神器！
+int printf(const char *fmt, ...) {
+  char buf[2048]; // 设定一个足够大的内部缓冲区
+  va_list ap;
+  va_start(ap, fmt);
+  int ret = vsprintf(buf, fmt, ap); // 先把组装好的字符串放进 buf 里
+  va_end(ap);
+  
+  // 调用 AM 提供的 putch 接口，将字符一个个打印到终端
+  for (int i = 0; i < ret; i++) {
+    putch(buf[i]);
+  }
+  return ret;
 }
 
 #endif
