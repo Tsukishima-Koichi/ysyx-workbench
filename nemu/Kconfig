@@ -152,6 +152,29 @@ config ITRACE_COND
   default "true"
 
 
+config MTRACE
+  bool "Enable memory trace (mtrace)"
+  default n
+  help
+    Enable memory trace to record all physical memory access.
+
+config MTRACE_COND
+  string "Memory trace condition"
+  depends on MTRACE
+  default "true"
+  help
+    Specify a condition for mtrace to output.
+    For example, you can write "addr >= 0x80000000 && addr <= 0x80002000" 
+    to only trace memory access in a specific range.
+
+
+config FTRACE
+  bool "Enable function trace (ftrace)"
+  default n
+  help
+    Enable function trace to record all function calls and returns based on ELF symbol table.
+
+
 config DIFFTEST
   depends on TARGET_NATIVE_ELF
   bool "Enable differential testing"

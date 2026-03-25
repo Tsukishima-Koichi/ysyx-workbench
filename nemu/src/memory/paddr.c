@@ -50,15 +50,52 @@ void init_mem() {
   Log("physical memory area [" FMT_PADDR ", " FMT_PADDR "]", PMEM_LEFT, PMEM_RIGHT);
 }
 
+// word_t paddr_read(paddr_t addr, int len) {
+//   if (likely(in_pmem(addr))) return pmem_read(addr, len);
+//   IFDEF(CONFIG_DEVICE, return mmio_read(addr, len));
+//   out_of_bound(addr);
+//   return 0;
+// }
 word_t paddr_read(paddr_t addr, int len) {
-  if (likely(in_pmem(addr))) return pmem_read(addr, len);
-  IFDEF(CONFIG_DEVICE, return mmio_read(addr, len));
-  out_of_bound(addr);
-  return 0;
+  word_t ret = 0;
+  if (likely(in_pmem(addr))) {
+    ret = pmem_read(addr, len);
+  } else {
+    MUXDEF(CONFIG_DEVICE, ret = mmio_read(addr, len), out_of_bound(addr));
+  }
+
+// ==================== mtrace 读记录 ====================
+#ifdef CONFIG_MTRACE
+  // 使用我们在 menuconfig 中定义的条件宏
+  if (CONFIG_MTRACE_COND) {
+    // 这里的 cpu.pc 需要 extern 一下，或者确认当前文件是否已经 include 了能获取 pc 的头文件
+    printf("[MTRACE] READ  | PC: " FMT_WORD " | Addr: " FMT_PADDR " | Len: %d | Data: 0x%08x\n", 
+           cpu.pc, addr, len, (uint32_t)ret);
+  }
+#endif
+// =======================================================
+
+  return ret;
 }
 
+// void paddr_write(paddr_t addr, int len, word_t data) {
+//   if (likely(in_pmem(addr))) { pmem_write(addr, len, data); return; }
+//   IFDEF(CONFIG_DEVICE, mmio_write(addr, len, data); return);
+//   out_of_bound(addr);
+// }
 void paddr_write(paddr_t addr, int len, word_t data) {
-  if (likely(in_pmem(addr))) { pmem_write(addr, len, data); return; }
-  IFDEF(CONFIG_DEVICE, mmio_write(addr, len, data); return);
-  out_of_bound(addr);
+// ==================== mtrace 写记录 ====================
+#ifdef CONFIG_MTRACE
+  if (CONFIG_MTRACE_COND) {
+    printf("[MTRACE] WRITE | PC: " FMT_WORD " | Addr: " FMT_PADDR " | Len: %d | Data: 0x%08x\n", 
+           cpu.pc, addr, len, (uint32_t)data);
+  }
+#endif
+// =======================================================
+
+  if (likely(in_pmem(addr))) {
+    pmem_write(addr, len, data);
+    return;
+  }
+  MUXDEF(CONFIG_DEVICE, mmio_write(addr, len, data), out_of_bound(addr));
 }

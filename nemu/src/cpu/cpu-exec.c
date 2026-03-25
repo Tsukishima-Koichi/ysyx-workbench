@@ -56,6 +56,15 @@ static void exec_once(Decode *s, vaddr_t pc) {
   s->snpc = pc;
   isa_exec_once(s);
   cpu.pc = s->dnpc;
+// ==================== 接入 ftrace ====================
+#ifdef CONFIG_FTRACE
+  extern void trace_func_call(paddr_t pc, paddr_t dnpc, uint32_t inst);
+  // 注意：s->isa.inst.val 这种取法取决于你的 NEMU 源码是怎么存机器码的，
+  // 确保传进去的是那 32 位的纯数字机器码
+  trace_func_call(s->pc, s->dnpc, s->isa.inst);
+#endif
+  // =====================================================
+
 #ifdef CONFIG_ITRACE
   char *p = s->logbuf;
   p += snprintf(p, sizeof(s->logbuf), FMT_WORD ":", s->pc);
@@ -79,6 +88,10 @@ static void exec_once(Decode *s, vaddr_t pc) {
   void disassemble(char *str, int size, uint64_t pc, uint8_t *code, int nbyte);
   disassemble(p, s->logbuf + sizeof(s->logbuf) - p,
       MUXDEF(CONFIG_ISA_x86, s->snpc, s->pc), (uint8_t *)&s->isa.inst, ilen);
+
+  // 此时 s->logbuf 里已经装满了完美的 trace 字符串 (如 "0x80000000: 00000413 li s0,0")
+  extern void record_iringbuf(char *logbuf); 
+  record_iringbuf(s->logbuf);
 #endif
 }
 
@@ -105,6 +118,10 @@ static void statistic() {
 void assert_fail_msg() {
   isa_reg_display();
   statistic();
+
+  // 当 NEMU 内部发生严重错误崩溃时，把死前的监控录像放出来
+  extern void display_iringbuf();
+  display_iringbuf();
 }
 
 /* Simulate how the CPU works. */
@@ -133,6 +150,11 @@ void cpu_exec(uint64_t n) {
            (nemu_state.halt_ret == 0 ? ANSI_FMT("HIT GOOD TRAP", ANSI_FG_GREEN) :
             ANSI_FMT("HIT BAD TRAP", ANSI_FG_RED))),
           nemu_state.halt_pc);
+      // 只要不是 GOOD TRAP (意味着要么是 ABORT, 要么是 BAD TRAP)
+      if (nemu_state.state == NEMU_ABORT || nemu_state.halt_ret != 0) {
+          extern void display_iringbuf();
+          display_iringbuf();
+      }
       // fall through
     case NEMU_QUIT: statistic();
   }
