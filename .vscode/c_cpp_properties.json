@@ -1,0 +1,30 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/npc/build/obj_dir",             // 解决 Vcpu.h 和 Vcpu__Dpi.h
+                "/home/zyzx/program/verilator/include",                     // 解决 verilated.h
+                "/home/zyzx/program/verilator/include/vltstd",              // 解决 svdpi.h
+                "${workspaceFolder}/**",                       // 扫描全工作空间（慎用，容易卡，但可以用）
+                "${workspaceFolder}/nvboard/include",          // 核心：精准指向 nvboard 头文件
+                "${workspaceFolder}/nvboard/usr/include",      // nvboard 的其他系统依赖
+                "${workspaceFolder}/npc/build/obj_dir",        // Verilator 自动生成的 C++ 头文件 (Vcpu.h)
+                "${workspaceFolder}/abstract-machine/am/include", // AM 框架的头文件
+                "${workspaceFolder}/abstract-machine/klib/include"// klib 的头文件
+            ],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-gcc-x64",
+            "forcedInclude": [
+                "${workspaceFolder}/nemu/include/generated/autoconf.h",
+                "${workspaceFolder}/nemu/include/macro.h"
+            ],
+            "defines": [
+                "ITRACE_COND=true"  // <--- 加上这一行！告诉 VS Code 这个宏默认就是 true
+            ]
+        }
+    ],
+    "version": 4
+}

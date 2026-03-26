@@ -36,10 +36,12 @@ static void pmem_write(paddr_t addr, int len, word_t data) {
   host_write(guest_to_host(addr), len, data);
 }
 
+#ifndef CONFIG_DEVICE
 static void out_of_bound(paddr_t addr) {
   panic("address = " FMT_PADDR " is out of bound of pmem [" FMT_PADDR ", " FMT_PADDR "] at pc = " FMT_WORD,
       addr, PMEM_LEFT, PMEM_RIGHT, cpu.pc);
 }
+#endif
 
 void init_mem() {
 #if   defined(CONFIG_PMEM_MALLOC)
@@ -57,26 +59,16 @@ void init_mem() {
 //   return 0;
 // }
 word_t paddr_read(paddr_t addr, int len) {
-  word_t ret = 0;
   if (likely(in_pmem(addr))) {
-    ret = pmem_read(addr, len);
+    return pmem_read(addr, len);
   } else {
-    MUXDEF(CONFIG_DEVICE, ret = mmio_read(addr, len), out_of_bound(addr));
+    // 如果开启了设备支持，就去读外设 (MMIO)；如果没开启，就触发越界报错
+    MUXDEF(CONFIG_DEVICE, return mmio_read(addr, len), out_of_bound(addr));
+    return 0; // 给编译器兜底用的返回值
   }
-
-// ==================== mtrace 读记录 ====================
-#ifdef CONFIG_MTRACE
-  // 使用我们在 menuconfig 中定义的条件宏
-  if (CONFIG_MTRACE_COND) {
-    // 这里的 cpu.pc 需要 extern 一下，或者确认当前文件是否已经 include 了能获取 pc 的头文件
-    printf("[MTRACE] READ  | PC: " FMT_WORD " | Addr: " FMT_PADDR " | Len: %d | Data: 0x%08x\n", 
-           cpu.pc, addr, len, (uint32_t)ret);
-  }
-#endif
-// =======================================================
-
-  return ret;
 }
+
+
 
 // void paddr_write(paddr_t addr, int len, word_t data) {
 //   if (likely(in_pmem(addr))) { pmem_write(addr, len, data); return; }
@@ -84,18 +76,10 @@ word_t paddr_read(paddr_t addr, int len) {
 //   out_of_bound(addr);
 // }
 void paddr_write(paddr_t addr, int len, word_t data) {
-// ==================== mtrace 写记录 ====================
-#ifdef CONFIG_MTRACE
-  if (CONFIG_MTRACE_COND) {
-    printf("[MTRACE] WRITE | PC: " FMT_WORD " | Addr: " FMT_PADDR " | Len: %d | Data: 0x%08x\n", 
-           cpu.pc, addr, len, (uint32_t)data);
-  }
-#endif
-// =======================================================
-
   if (likely(in_pmem(addr))) {
     pmem_write(addr, len, data);
-    return;
+  } else {
+    // 如果开启了设备支持，就去写外设 (MMIO)；如果没开启，就触发越界报错
+    MUXDEF(CONFIG_DEVICE, mmio_write(addr, len, data), out_of_bound(addr));
   }
-  MUXDEF(CONFIG_DEVICE, mmio_write(addr, len, data), out_of_bound(addr));
 }

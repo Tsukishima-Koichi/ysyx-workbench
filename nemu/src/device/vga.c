@@ -14,6 +14,7 @@
 ***************************************************************************************/
 
 #include <common.h>
+
 #include <device/map.h>
 
 #define SCREEN_W (MUXDEF(CONFIG_VGA_SIZE_800x600, 800, 400))
@@ -74,6 +75,12 @@ static inline void update_screen() {
 void vga_update_screen() {
   // TODO: call `update_screen()` when the sync register is non-zero,
   // then zero out the sync register
+  
+  // vgactl_port_base[1] 对应的是 SYNC 寄存器
+  if (vgactl_port_base[1] == 1) {
+    update_screen();           // 调用上面的 static inline 函数，把显存画到屏幕上
+    vgactl_port_base[1] = 0;   // 画面刷新完之后，将同步寄存器清零
+  }
 }
 
 void init_vga() {

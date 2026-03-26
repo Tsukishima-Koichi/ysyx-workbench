@@ -17,6 +17,7 @@
 #include <memory/host.h>
 #include <memory/vaddr.h>
 #include <device/map.h>
+#include <cpu/cpu.h>   // 【新增】：为了使用 cpu.pc
 
 #define IO_SPACE_MAX (32 * 1024 * 1024)
 
@@ -56,8 +57,18 @@ word_t map_read(paddr_t addr, int len, IOMap *map) {
   assert(len >= 1 && len <= 8);
   check_bound(map, addr);
   paddr_t offset = addr - map->low;
-  invoke_callback(map->callback, offset, len, false); // prepare data to read
+  invoke_callback(map->callback, offset, len, false); // read
   word_t ret = host_read(map->space + offset, len);
+
+// ==================== DTRACE 读记录 ====================
+#ifdef CONFIG_DTRACE
+  if (CONFIG_DTRACE_COND) {
+    printf("[DTRACE] READ  | PC: " FMT_WORD " | Device: %-10s | Addr: " FMT_PADDR " | Len: %d | Data: 0x%08x\n", 
+           cpu.pc, map->name, addr, len, (uint32_t)ret);
+  }
+#endif
+// =======================================================
+
   return ret;
 }
 
@@ -66,5 +77,31 @@ void map_write(paddr_t addr, int len, word_t data, IOMap *map) {
   check_bound(map, addr);
   paddr_t offset = addr - map->low;
   host_write(map->space + offset, len, data);
-  invoke_callback(map->callback, offset, len, true);
+  invoke_callback(map->callback, offset, len, true); // write
+
+// ==================== DTRACE 写记录 ====================
+#ifdef CONFIG_DTRACE
+  if (CONFIG_DTRACE_COND) {
+    printf("[DTRACE] WRITE | PC: " FMT_WORD " | Device: %-10s | Addr: " FMT_PADDR " | Len: %d | Data: 0x%08x\n", 
+           cpu.pc, map->name, addr, len, (uint32_t)data);
+  }
+#endif
+// =======================================================
 }
+
+// word_t map_read(paddr_t addr, int len, IOMap *map) {
+//   assert(len >= 1 && len <= 8);
+//   check_bound(map, addr);
+//   paddr_t offset = addr - map->low;
+//   invoke_callback(map->callback, offset, len, false); // prepare data to read
+//   word_t ret = host_read(map->space + offset, len);
+//   return ret;
+// }
+
+// void map_write(paddr_t addr, int len, word_t data, IOMap *map) {
+//   assert(len >= 1 && len <= 8);
+//   check_bound(map, addr);
+//   paddr_t offset = addr - map->low;
+//   host_write(map->space + offset, len, data);
+//   invoke_callback(map->callback, offset, len, true);
+// }

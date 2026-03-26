@@ -175,6 +175,20 @@ config FTRACE
     Enable function trace to record all function calls and returns based on ELF symbol table.
 
 
+config DTRACE
+  bool "Enable dtrace (Device Trace)"
+  default n
+  help
+    Enable this to trace all MMIO and Port I/O device accesses.
+
+config DTRACE_COND
+  string "dtrace condition"
+  depends on DTRACE
+  default "true"
+  help
+    A C boolean expression to control when to print dtrace logs.
+
+
 config DIFFTEST
   depends on TARGET_NATIVE_ELF
   bool "Enable differential testing"

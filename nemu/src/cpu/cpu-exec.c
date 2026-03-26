@@ -102,7 +102,10 @@ static void execute(uint64_t n) {
     g_nr_guest_inst ++;
     trace_and_difftest(&s, cpu.pc);
     if (nemu_state.state != NEMU_RUNNING) break;
-    IFDEF(CONFIG_DEVICE, device_update());
+
+    if (g_nr_guest_inst % 100 == 0) {
+        IFDEF(CONFIG_DEVICE, device_update());
+    }
   }
 }
 
@@ -120,8 +123,11 @@ void assert_fail_msg() {
   statistic();
 
   // 当 NEMU 内部发生严重错误崩溃时，把死前的监控录像放出来
+  #ifdef CONFIG_IRINGBUF
   extern void display_iringbuf();
   display_iringbuf();
+  #endif
+  
 }
 
 /* Simulate how the CPU works. */
@@ -152,8 +158,10 @@ void cpu_exec(uint64_t n) {
           nemu_state.halt_pc);
       // 只要不是 GOOD TRAP (意味着要么是 ABORT, 要么是 BAD TRAP)
       if (nemu_state.state == NEMU_ABORT || nemu_state.halt_ret != 0) {
+          #ifdef CONFIG_IRINGBUF
           extern void display_iringbuf();
           display_iringbuf();
+          #endif
       }
       // fall through
     case NEMU_QUIT: statistic();
