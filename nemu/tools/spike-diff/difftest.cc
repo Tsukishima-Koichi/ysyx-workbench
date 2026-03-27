@@ -39,6 +39,14 @@ static debug_module_config_t difftest_dm_config = {
 struct diff_context_t {
   word_t gpr[MUXDEF(CONFIG_RVE, 16, 32)];
   word_t pc;
+
+  // 【新增】必须和 NEMU 的顺序一模一样
+  struct {
+    word_t mepc;
+    word_t mcause;
+    word_t mtvec;
+    word_t mstatus;
+  } csr;
 };
 
 static sim_t* s = NULL;
@@ -60,6 +68,13 @@ void sim_t::diff_get_regs(void* diff_context) {
     ctx->gpr[i] = state->XPR[i];
   }
   ctx->pc = state->pc;
+
+  // 【新增】从 Spike 内部读取 CSR 并填入对接结构体
+  // CSR 编号：mstatus(0x300), mtvec(0x305), mepc(0x341), mcause(0x342)
+  ctx->csr.mstatus = (word_t)p->get_csr(0x300);
+  ctx->csr.mtvec   = (word_t)p->get_csr(0x305);
+  ctx->csr.mepc    = (word_t)p->get_csr(0x341);
+  ctx->csr.mcause  = (word_t)p->get_csr(0x342);
 }
 
 void sim_t::diff_set_regs(void* diff_context) {
@@ -68,6 +83,12 @@ void sim_t::diff_set_regs(void* diff_context) {
     state->XPR.write(i, (sword_t)ctx->gpr[i]);
   }
   state->pc = ctx->pc;
+
+  // 使用 put_csr 写入，显式强转为 reg_t 以匹配参数类型
+  p->put_csr(0x300, (reg_t)ctx->csr.mstatus);
+  p->put_csr(0x305, (reg_t)ctx->csr.mtvec);
+  p->put_csr(0x341, (reg_t)ctx->csr.mepc);
+  p->put_csr(0x342, (reg_t)ctx->csr.mcause);
 }
 
 void sim_t::diff_memcpy(reg_t dest, void* src, size_t n) {

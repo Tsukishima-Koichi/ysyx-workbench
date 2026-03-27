@@ -7,10 +7,21 @@ static Context* (*user_handler)(Event, Context*) = NULL;
 Context* __am_irq_handle(Context *c) {
   if (user_handler) {
     Event ev = {0};
+    // 检查硬件传过来的 mcause（异常原因）
     switch (c->mcause) {
-      default: ev.event = EVENT_ERROR; break;
+      case 11: // 11 代表 RISC-V 机器模式下的 ecall
+        ev.event = EVENT_YIELD;
+        
+        // 【极其重要的一步】：跳过 ecall 指令！
+        // 因为 mepc 目前指向的是 ecall 这条指令本身，
+        // 如果不加 4，一会儿回去的时候 CPU 又会执行一遍 ecall，导致无限死循环！
+        c->mepc += 4; 
+        break;
+        
+      default: 
+        ev.event = EVENT_ERROR; 
+        break;
     }
-
     c = user_handler(ev, c);
     assert(c != NULL);
   }

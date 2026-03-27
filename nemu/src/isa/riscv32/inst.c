@@ -178,6 +178,34 @@ static int decode_exec(Decode *s) {
   // remu: 无符号取模 (包含除零防御)
   INSTPAT("0000001 ????? ????? 111 ????? 01100 11", remu   , R, R(rd) = (src2 == 0) ? src1 : (src1 % src2));
 
+  // ================= Zicsr 扩展指令 (系统/特权) =================
+  
+  // csrrw (CSR Read/Write): 把 CSR 的旧值读入 rd，把 src1 写进 CSR
+  INSTPAT("??????? ????? ????? 001 ????? 11100 11", csrrw  , I, word_t csr = BITS(s->isa.inst, 31, 20); word_t t = csr_read(csr); csr_write(csr, src1); R(rd) = t);
+  
+  // csrrs (CSR Read and Set): 把 CSR 的旧值读入 rd，然后把 CSR 原来的值和 src1 按位或，再写回 CSR
+  // (如果 rs1 = x0，那就相当于纯粹的读 CSR 操作)
+  INSTPAT("??????? ????? ????? 010 ????? 11100 11", csrrs  , I, word_t csr = BITS(s->isa.inst, 31, 20); word_t t = csr_read(csr); csr_write(csr, t | src1); R(rd) = t);
+
+  // ================= 系统异常返回指令 =================
+
+  // mret (Machine-mode Trap Return)
+  INSTPAT("0011000 00010 00000 000 00000 11100 11", mret, I, \
+    word_t mstatus = cpu.csr.mstatus; \
+    word_t mpie = (mstatus >> 7) & 1; \
+    // 1. MIE = MPIE (恢复中断使能)
+    mstatus = (mstatus & ~(1 << 3)) | (mpie << 3); \
+    // 2. MPIE = 1 (规范要求返回后 MPIE 置 1)
+    mstatus |= (1 << 7); \
+    // 3. 【最关键的一步】MPP = 0 (返回后特权级改为 U-mode，或清空备份)
+    mstatus &= ~(3 << 11); \
+    \
+    cpu.csr.mstatus = mstatus; \
+    s->dnpc = cpu.csr.mepc; \
+  );
+
+  // 请确保将 ecall 放在 inv (兜底的非法指令) 之前！
+  INSTPAT("0000000 00000 00000 000 00000 11100 11", ecall  , N, s->dnpc = isa_raise_intr(11, s->pc));
   INSTPAT("0000000 00001 00000 000 00000 11100 11", ebreak , N, NEMUTRAP(s->pc, R(10))); // R(10) is $a0
   INSTPAT("??????? ????? ????? ??? ????? ????? ??", inv    , N, INV(s->pc));
   

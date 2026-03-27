@@ -23,6 +23,27 @@ const char *regs[] = {
   "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"
 };
 
+// reg.c
+word_t csr_read(word_t csr_addr) {
+  switch (csr_addr) {
+    case 0x300: return cpu.csr.mstatus;
+    case 0x305: return cpu.csr.mtvec;
+    case 0x341: return cpu.csr.mepc;
+    case 0x342: return cpu.csr.mcause;
+    default: return 0; 
+  }
+}
+
+void csr_write(word_t csr_addr, word_t val) {
+  switch (csr_addr) {
+    case 0x300: cpu.csr.mstatus = val; break;
+    case 0x305: cpu.csr.mtvec = val; break;
+    case 0x341: cpu.csr.mepc = val; break;
+    case 0x342: cpu.csr.mcause = val; break;
+    default: break;
+  }
+}
+
 void isa_reg_display() {
   int i;
   // traversing 32 general-purpose registers
@@ -45,15 +66,18 @@ word_t isa_reg_str2val(const char *s, bool *success) {
     return cpu.pc;
   }
 
+  // 支持通过名字读取 CSR
+  if (strcmp(s, "mstatus") == 0) { *success = true; return cpu.csr.mstatus; }
+  if (strcmp(s, "mtvec") == 0) { *success = true; return cpu.csr.mtvec; }
+  if (strcmp(s, "mepc") == 0) { *success = true; return cpu.csr.mepc; }
+  if (strcmp(s, "mcause") == 0) { *success = true; return cpu.csr.mcause; }
+
   // 2. 遍历 32 个通用寄存器进行名字匹配
   for (int i = 0; i < 32; i++) {
     // 💡 细节：regs[0] 在数组里存的是 "$0"，而其他存的是 "ra", "t0" 等纯字母。
     // 为了防止出错，如果传入的是 "0"，我们也认作是 0 号寄存器。
     if (strcmp(s, regs[i]) == 0 || (i == 0 && strcmp(s, "0") == 0)) {
       *success = true;
-      
-      // 注意：这里的 cpu.gpr[i] 必须和你之前在 isa_reg_display 里写的取值方式一模一样。
-      // 如果你之前写的是 cpu.gpr[i]._32，这里也要加上 ._32
       return cpu.gpr[i]; 
     }
   }
@@ -62,3 +86,4 @@ word_t isa_reg_str2val(const char *s, bool *success) {
   *success = false;
   return 0;
 }
+

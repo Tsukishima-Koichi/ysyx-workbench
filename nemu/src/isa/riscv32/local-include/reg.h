@@ -30,4 +30,8 @@ static inline const char* reg_name(int idx) {
   return regs[check_reg_idx(idx)];
 }
 
+// reg.h
+word_t csr_read(word_t csr_addr);
+void csr_write(word_t csr_addr, word_t val);
+
 #endif
