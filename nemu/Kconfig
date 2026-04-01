@@ -189,6 +189,15 @@ config DTRACE_COND
     A C boolean expression to control when to print dtrace logs.
 
 
+config ETRACE
+    bool "Enable Exception Trace (etrace)"
+    default y
+    help
+      Enable tracing of exception entries and returns.
+      This will print a log whenever the CPU raises an interrupt/exception
+      or executes an mret instruction.
+      
+
 config DIFFTEST
   depends on TARGET_NATIVE_ELF
   bool "Enable differential testing"

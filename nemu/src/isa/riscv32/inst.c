@@ -201,6 +201,10 @@ static int decode_exec(Decode *s) {
     mstatus &= ~(3 << 11); \
     \
     cpu.csr.mstatus = mstatus; \
+    /* 【etrace 新增】记录退出异常的踪迹 */ \
+    /* 注意这里用了 IFDEF 宏来避免没开启 ETRACE 时报变量未使用的警告 */ \
+    IFDEF(CONFIG_ETRACE, Log("🔙 [etrace] Trap Return: PC = " FMT_WORD ", Jump back to = " FMT_WORD, s->pc, cpu.csr.mepc)); \
+    \
     s->dnpc = cpu.csr.mepc; \
   );
 
