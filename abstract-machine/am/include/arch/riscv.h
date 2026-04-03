@@ -28,9 +28,9 @@ struct Context {
 #define GPR1 gpr[17] // a7
 #endif
 
-#define GPR2 gpr[0]
-#define GPR3 gpr[0]
-#define GPR4 gpr[0]
-#define GPRx gpr[0]
+#define GPR2 gpr[10] // a0: 第 1 个参数
+#define GPR3 gpr[11] // a1: 第 2 个参数
+#define GPR4 gpr[12] // a2: 第 3 个参数
+#define GPRx gpr[10] // a0: 返回值也存放在这里
 
 #endif

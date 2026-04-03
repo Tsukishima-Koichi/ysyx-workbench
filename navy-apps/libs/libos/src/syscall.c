@@ -66,12 +66,30 @@ int _open(const char *path, int flags, mode_t mode) {
 }
 
 int _write(int fd, void *buf, size_t count) {
-  _exit(SYS_write);
-  return 0;
+  // 直接调用已经封装好的 _syscall_ 宏，发起 SYS_write 请求
+  // 参数依次是：系统调用号，文件描述符 fd，缓冲区地址 buf，以及写入长度 count
+  return _syscall_(SYS_write, fd, (intptr_t)buf, count);
 }
 
-void *_sbrk(intptr_t increment) {
-  return (void *)-1;
+extern char _end; // 由链接器提供的符号，代表程序数据段的结束
+
+// 记录当前的 program break 位置，初始设为 _end
+static intptr_t current_program_break = (intptr_t)&_end;
+
+void* _sbrk(intptr_t increment) {
+  intptr_t old_break = current_program_break;
+  intptr_t new_break = old_break + increment;
+
+  // 调用系统调用 SYS_brk 告知内核调整新的边界
+  // 根据要求，SYS_brk 接收新地址作为参数，成功返回 0
+  if (_syscall_(SYS_brk, new_break, 0, 0) == 0) {
+    current_program_break = new_break;
+    // 成功：返回旧的边界地址（这符合 libc 对 sbrk 的要求）
+    return (void *)old_break;
+  } else {
+    // 失败：返回 -1
+    return (void *)-1;
+  }
 }
 
 int _read(int fd, void *buf, size_t count) {

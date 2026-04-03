@@ -10,7 +10,12 @@ Context* __am_irq_handle(Context *c) {
     // 检查硬件传过来的 mcause（异常原因）
     switch (c->mcause) {
       case 11: // 11 代表 RISC-V 机器模式下的 ecall
-        ev.event = EVENT_YIELD;
+        // 通过检查 a7 寄存器 (gpr[17]) 来区分 Syscall 和 Yield
+        if (c->gpr[17] == -1) {
+          ev.event = EVENT_YIELD;
+        } else {
+          ev.event = EVENT_SYSCALL;
+        }
         
         // 【极其重要的一步】：跳过 ecall 指令！
         // 因为 mepc 目前指向的是 ecall 这条指令本身，
@@ -22,6 +27,11 @@ Context* __am_irq_handle(Context *c) {
         ev.event = EVENT_ERROR; 
         break;
     }
+
+    // 将具体的异常原因和出错的 PC 地址打包，传给 Nanos-lite 备查
+    ev.cause = c->mcause;
+    ev.ref = c->mepc;
+
     c = user_handler(ev, c);
     assert(c != NULL);
   }
