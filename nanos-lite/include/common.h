@@ -13,6 +13,6 @@
 #include <debug.h>
 
 // 【新增这一行】这就是我们的 strace 总开关！
-#define CONFIG_STRACE 1
+// #define CONFIG_STRACE 1
 
 #endif

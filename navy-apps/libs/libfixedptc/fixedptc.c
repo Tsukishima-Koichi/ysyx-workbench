@@ -198,3 +198,38 @@ fixedpt fixedpt_ln(fixedpt x) {
 	return (fixedpt_mul(LN2, (log2 << FIXEDPT_FBITS)) + f
 	    - fixedpt_mul(s, f - R));
 }
+
+
+fixedpt fixedpt_fromfloat(void *p) {
+    // 将指针强转为无符号 32 位整型指针，按原位模式读取，坚决不触发 FPU 指令
+    uint32_t val = *(uint32_t *)p;
+
+    // 1. 拆解 IEEE 754 的三个部分
+    uint32_t sign = val >> 31;
+    int32_t exp = ((val >> 23) & 0xFF) - 127; // 减去 127 的偏移量，得到真实的指数
+    uint32_t frac = val & 0x7FFFFF;
+
+    // 特殊处理：如果是 0.0（指数为 -127 且尾数为 0），直接返回 0
+    if (exp == -127 && frac == 0) {
+        return 0;
+    }
+
+    // 2. 补上隐藏在最高位的 '1'
+    frac |= 0x800000;
+
+    // 3. 计算位移量
+    // 依据推导：Shift = exp - 15
+    int shift = exp - 15;
+    fixedpt result;
+
+    if (shift > 0) {
+        // 指数比较大，需要向左移
+        result = frac << shift;
+    } else {
+        // 指数较小，需要向右移（注意负数取反变成正的位移量）
+        result = frac >> (-shift);
+    }
+
+    // 4. 加上符号返回
+    return sign ? -result : result;
+}

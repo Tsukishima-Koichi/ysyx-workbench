@@ -26,7 +26,7 @@ void init_proc() {
 
   // load program here
   // 加载第一个用户程序 (目前 filename 参数被 loader 忽略，传 NULL 即可)
-  naive_uload(NULL, NULL);
+  naive_uload(NULL, "/bin/bmp-test");
 }
 
 Context* schedule(Context *prev) {

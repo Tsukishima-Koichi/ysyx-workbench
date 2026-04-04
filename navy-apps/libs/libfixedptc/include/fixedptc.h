@@ -127,37 +127,49 @@ typedef	__uint128_t fixedptud;
 
 /* Multiplies a fixedpt number with an integer, returns the result. */
 static inline fixedpt fixedpt_muli(fixedpt A, int B) {
-	return 0;
+    return A * B;
 }
 
 /* Divides a fixedpt number with an integer, returns the result. */
 static inline fixedpt fixedpt_divi(fixedpt A, int B) {
-	return 0;
+    return A / B;
 }
 
 /* Multiplies two fixedpt numbers, returns the result. */
 static inline fixedpt fixedpt_mul(fixedpt A, fixedpt B) {
-	return 0;
+    // 两个 24.8 的数相乘，结果会变成 48.16 格式。
+    // 为了防止溢出，必须先转成 64 位整型 (fixedptd)，乘完后再右移 8 位变回 24.8
+    return (fixedpt)(((fixedptd)A * (fixedptd)B) >> FIXEDPT_FBITS);
 }
-
 
 /* Divides two fixedpt numbers, returns the result. */
 static inline fixedpt fixedpt_div(fixedpt A, fixedpt B) {
-	return 0;
+    // 除法会损失精度。为了保留 8 位小数，被除数 A 必须先左移 8 位。
+    // 同样需要 64 位来防止左移溢出。
+    return (fixedpt)(((fixedptd)A << FIXEDPT_FBITS) / (fixedptd)B);
 }
 
 static inline fixedpt fixedpt_abs(fixedpt A) {
-	return 0;
+    return A < 0 ? -A : A;
 }
 
 static inline fixedpt fixedpt_floor(fixedpt A) {
-	return 0;
+    // floor 的语义是“向下取整”。
+    // 极其巧妙的是，在计算机的二进制补码表示中，直接把小数部分（低 8 位）清零，
+    // 对于正数是直接抹去小数，对于负数则是向更小的方向取整。
+    // 例如：-1.5 (0xFFFFFE80) 清零低 8 位后变成 -2.0 (0xFFFFFE00)，完美符合 floor 语义！
+    return A & ~FIXEDPT_FMASK;
 }
 
 static inline fixedpt fixedpt_ceil(fixedpt A) {
-	return 0;
+    // ceil 的语义是“向上取整”。
+    // 如果没有小数部分，直接返回。
+    // 如果有小数部分，先向下取整，然后加上 1.0 (FIXEDPT_ONE)。
+    if (A & FIXEDPT_FMASK) {
+        return (A & ~FIXEDPT_FMASK) + FIXEDPT_ONE;
+    }
+    return A;
 }
-
 /*
  * Note: adding and substracting fixedpt numbers can be done by using
  * the regular integer operators + and -.
