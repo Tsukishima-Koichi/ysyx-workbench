@@ -6,6 +6,10 @@
 #include "Vcpu__Dpi.h" 
 #include "Vcpu.h"
 #include "memory.h"  // 引入内存和加载模块
+#include "verilated_vcd_c.h"  // 引入波形导出相关的头文件
+
+// #define GEN_WAVEFORM  // 定义宏以启用波形生成
+// #define MAX_CYCLES 50000  // 定义最大仿真周期数，防止死循环
 
 svScope regfile_scope = NULL;
 
@@ -18,6 +22,15 @@ int main(int argc, char** argv) {
     VerilatedContext* contextp = new VerilatedContext;
     contextp->commandArgs(argc, argv);
     Vcpu* top = new Vcpu{contextp};
+
+    #ifdef GEN_WAVEFORM
+    printf("Waveform generation enabled. Output will be saved to ./build/wave.vcd\n");
+    // 初始化波形追踪
+    Verilated::traceEverOn(true);
+    VerilatedVcdC* tfp = new VerilatedVcdC;
+    top->trace(tfp, 99);                  // 99 表示追踪所有的层级深度
+    tfp->open("build/wave.vcd");          // 将波形文件输出到 build 目录下
+    #endif
 
     memset(pmem, 0, PMEM_SIZE);
 
@@ -39,25 +52,35 @@ int main(int argc, char** argv) {
     
     printf("--- CPU Simulation Start ---\n");
 
-    // int max_cycles = 500000000; 
+    #ifdef MAX_CYCLES
+    printf("Maximum simulation cycles set to %d\n", MAX_CYCLES);
+    int max_cycles = MAX_CYCLES; 
+    #endif
+    
     int cycles = 0;
 
     // 仿真主循环
-    // while (!contextp->gotFinish() && cycles < max_cycles) {
     while (!contextp->gotFinish()) {
-        uint32_t last_pc = top->pc;
-
         top->clk = 0; top->eval();
+
+        #ifdef GEN_WAVEFORM
+        contextp->timeInc(1);             // 时间步进
+        tfp->dump(contextp->time());      // 记录时钟低电平时的波形
+        #endif
+
         top->clk = 1; top->eval();
+
+        #ifdef GEN_WAVEFORM
+        contextp->timeInc(1);             // 时间步进
+        tfp->dump(contextp->time());      // 记录时钟高电平时的波形
+        #endif
+
         cycles++;
 
-        // 停机条件判断
-        if (top->inst == 0x00100073 || top->pc == last_pc) {
-            if (top->inst == 0x00100073) {
-                printf("\n[Halt] ebreak at PC = 0x%08x after %d cycles\n", top->pc, cycles);
-            } else {
-                printf("\n[Halt] Dead Loop at PC = 0x%08x after %d cycles\n", top->pc, cycles);
-            }
+        // 使用 halt_req判定
+        if (top->halt_req) {
+
+            printf("\n[Halt] ebreak detected after %d cycles\n", cycles);
             
             if (regfile_scope != NULL) {
                 svSetScope(regfile_scope);
@@ -66,19 +89,41 @@ int main(int argc, char** argv) {
                     printf("\33[1;32mHIT GOOD TRAP\33[0m\n");
                 } else {
                     printf("\33[1;31mHIT BAD TRAP (a0 = %d, expected 0)\33[0m\n", a0_val);
+
+                    #ifdef GEN_WAVEFORM
+                    // 🌟 核心修复：在程序异常退出前，强行把波形刷入硬盘！
+                    if (tfp) {
+                        tfp->close();
+                    }
+                    #endif
+
                     return 1; 
                 }
             }
             break; 
-        }        
+        }
+
+        #ifdef MAX_CYCLES
+        if (cycles >= max_cycles) {
+            printf("\33[1;31mSIMULATION TIMEOUT\33[0m\n");
+                    #ifdef GEN_WAVEFORM
+                    if (tfp) {
+                        tfp->close();
+                    }
+                    #endif
+            return 1; 
+        }
+        #endif
     }
 
-    // if (cycles >= max_cycles) {
-    //     printf("\33[1;31mSIMULATION TIMEOUT\33[0m\n");
-    //     return 1; 
-    // }
+    
+    #ifdef GEN_WAVEFORM
+    // 仿真结束时，一定要关闭波形文件，否则文件会损坏！
+    tfp->close();
+    #endif
     
     printf("--- CPU Simulation End ---\n");
+
     delete top;
     delete contextp;
     return 0; 
