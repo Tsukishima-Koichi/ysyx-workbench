@@ -1,0 +1,1 @@
+python3 -c "import sys; content = open('sum.hex').read().split('\n')[1:]; [print(w) for line in content for w in line.split() if ':' not in w and len(w)==8]" > sum_clean.hex

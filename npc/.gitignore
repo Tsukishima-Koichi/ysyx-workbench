@@ -9,4 +9,5 @@
 !*.cpp
 !.gitignore
 !README.md
+!/test_hex/*
 build/
