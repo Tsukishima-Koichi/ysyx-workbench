@@ -6,10 +6,14 @@
 #include "Vcpu__Dpi.h" 
 #include "Vcpu.h"
 #include "memory.h"  // 引入内存和加载模块
-#include "verilated_vcd_c.h"  // 引入波形导出相关的头文件
+
 
 // #define GEN_WAVEFORM  // 定义宏以启用波形生成
 // #define MAX_CYCLES 50000  // 定义最大仿真周期数，防止死循环
+
+#ifdef GEN_WAVEFORM
+#include "verilated_vcd_c.h"  // 引入波形导出相关的头文件
+#endif
 
 svScope regfile_scope = NULL;
 
