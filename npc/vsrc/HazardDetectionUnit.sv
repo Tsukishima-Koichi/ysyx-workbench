@@ -2,26 +2,32 @@
 `include "defines.sv"
 
 module HazardDetectionUnit(
-    // 来自 ID 阶段 (正在译码的指令)
+    // 来自 ID 阶段 (当前译码的指令)
     input  logic [4:0] id_rs1,
     input  logic [4:0] id_rs2,
-    input  logic [6:0] id_opcode, // 当前指令的操作码
+    input  logic [6:0] id_opcode,
     
     // 来自 EX 阶段 (上一条指令)
-    input  logic [1:0] ex_WbSel, // 判断是否是 Load 指令 (WbSel == 2'b10 表示从内存读)
-    input  logic [4:0] ex_rd,    // 上一条指令的目标寄存器
+    input  logic       ex_RegWen,
+    input  logic [1:0] ex_WbSel, // 2'b10 表示 Load
+    input  logic [4:0] ex_rd,
     
-    // 控制流水线停顿的输出
+    // 来自 MEM 阶段 (上上一条指令) - 保留端口以兼容 myCPU 顶层例化
+    input  logic [1:0] mem_WbSel, 
+    input  logic [4:0] mem_rd,
+    
+    // 输出控制信号
     output logic       stall_IF,
     output logic       stall_ID,
     output logic       flush_ID_EX
 );
 
+    logic rs1_read, rs2_read;
     logic is_load_use;
-    logic rs1_read;
-    logic rs2_read;
 
-    // 🌟 核心修复：判断当前指令是否真的需要读取 rs1 和 rs2
+    // ========================================================
+    // 1. 判断当前 ID 阶段指令是否真的需要读取 rs1 和 rs2
+    // ========================================================
     always_comb begin
         // 是否读取 rs1？
         case (id_opcode)
@@ -42,21 +48,28 @@ module HazardDetectionUnit(
         endcase
     end
 
+    // ========================================================
+    // 2. 经典的 Load-Use 冒险检测
+    // ========================================================
+    // 规则: 如果上一条指令 (正处于 EX 阶段) 是 Load，且当前指令需要用它的目标寄存器。
+    // 因为 Load 的数据必须等到 WB 阶段才能出 BRAM/总线，即使有前递网络，
+    // 也必须停顿 (Stall) 一拍，等 Load 进入 MEM 阶段后再流转。
     always_comb begin
         is_load_use = 1'b0;
         
-        // 判断条件：
-        // 1. 上一条指令是 Load (ex_WbSel == 2'b10)
-        // 2. 目标寄存器不是 x0
         if ((ex_WbSel == 2'b10) && (ex_rd != 5'd0)) begin
-            // 3. 🌟 只有在当前指令确实需要读取对应寄存器时，才触发冲突检测
             if ((rs1_read && (ex_rd == id_rs1)) || (rs2_read && (ex_rd == id_rs2))) begin
                 is_load_use = 1'b1;
             end
         end
     end
 
-    // 发生 Load-Use 冒险时：冻结 PC、冻结 IF/ID 阶段，并清空传入 EX 阶段的控制信号(塞气泡)
+    // ========================================================
+    // 3. 综合 Stall 逻辑
+    // ========================================================
+    // 说明：分支判断已移入 EX 阶段，因此 Branch 指令视同普通运算指令，
+    // 仅依赖上述的 Load-Use 停顿即可，不再需要额外的 branch_hazard 检查！
+    
     assign stall_IF    = is_load_use;
     assign stall_ID    = is_load_use;
     assign flush_ID_EX = is_load_use;

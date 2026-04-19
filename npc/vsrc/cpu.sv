@@ -1,7 +1,7 @@
 // vsrc/cpu.sv
 `timescale 1ns / 1ps
 
-// 1. 导入 C++ 中的内存读写函数
+// 导入 C++ 中的内存读写函数
 import "DPI-C" context function int pmem_read(input int raddr);
 import "DPI-C" context function void pmem_write(input int waddr, input int wdata, input byte wmask);
 
@@ -9,8 +9,8 @@ module cpu(
     input logic clk,
     input logic rst,
 
-    output logic [31:0] pc,   // 🌟 变成输出端口
-    output logic [31:0] inst, // 🌟 变成输出端口
+    output logic [31:0] pc,
+    output logic [31:0] inst,
     output logic        halt_req
 );
     // 线缆声明
@@ -23,7 +23,7 @@ module cpu(
     logic [31:0] perip_wdata;
     logic [31:0] perip_rdata;
 
-    // 2. 例化核心流水线
+    // 例化核心流水线
     myCPU u_myCPU (
         .cpu_rst      (rst),
         .cpu_clk      (clk),
@@ -36,38 +36,46 @@ module cpu(
         .perip_rdata  (perip_rdata)
     );
 
-    // 3. 组合逻辑读 IROM (取指)
-    // 直接映射到 C++ 侧的 pmem_read
-    always_comb begin
-        irom_data = pmem_read(irom_addr);
-    end
+    // ====================================================
+    // 🌟 核心修复 1：BRAM 读特性模拟 (打一拍地址，延迟一周期出数据)
+    // ====================================================
+    logic [31:0] irom_addr_reg;
+    logic [31:0] perip_addr_reg;
 
-    // 4. 组合逻辑读 DRAM / 外设 (访存)
-    always_comb begin
-        perip_rdata = pmem_read(perip_addr);
-    end
-
-    // 5. 核心修复：将写操作改为异步复位风格以匹配全局时序
-    // 解决 SYNCASYNCNET 警告
     always_ff @(posedge clk) begin
         if (rst) begin
-            // 复位时不执行写操作
-        end else if (perip_wen) begin
-            // 只有非复位且写使能有效时，调用 C++ 侧的 pmem_write
-            // 拼接 wmask 以适配 C++ 的 char 类型
+            irom_addr_reg  <= 32'h8000_0000;
+            perip_addr_reg <= 32'h0000_0000;
+        end else begin
+            // 在时钟上升沿锁存 CPU 发出的地址
+            irom_addr_reg  <= irom_addr;
+            perip_addr_reg <= perip_addr;
+        end
+    end
+
+    // 组合逻辑根据锁存的地址向 C++ 读取数据
+    // 这样在外部看来，当前周期的 data 其实是上一周期地址的内容，完美契合 BRAM！
+    always_comb begin
+        irom_data   = pmem_read(irom_addr_reg);
+        perip_rdata = pmem_read(perip_addr_reg);
+    end
+
+    // ====================================================
+    // 🌟 核心修复 2：BRAM 写特性模拟 (同步写入)
+    // ====================================================
+    always_ff @(posedge clk) begin
+        if (!rst && perip_wen) begin
+            // 在时钟上升沿且写使能时，调用 C++ 写入数据
             pmem_write(perip_addr, perip_wdata, {4'b0, perip_mask});
         end
     end
     
-    // 6. 暴露信号供 C++ main.cpp 停机判断使用
-
-    // 使用跨层级引用获取 myCPU 内部的 PC 和指令信号
-    // 这里的 if_pc 和 if_inst 对应 myCPU.sv 中的定义
-    assign pc = u_myCPU.if_pc;     
-    assign inst = u_myCPU.if_inst; 
-
-    // 🌟 获取 EX 阶段确实执行了的 ebreak 信号 (由于在 EX 阶段，它已经逃过了分支冲刷)
+    // ====================================================
+    // 🌟 核心修复 3：修复 myCPU 内部信号引用错误及测试探针
+    // ====================================================
+    // 修改为 myCPU 中实际存在的信号，此处暴露 EX 阶段因为 ebreak 也是在 EX 判定的
+    assign pc       = u_myCPU.ex_pc;       
+    assign inst     = u_myCPU.id_inst;     
     assign halt_req = u_myCPU.ex_IsEbreak;
 
 endmodule
-
