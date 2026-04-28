@@ -542,4 +542,30 @@ module myCPU (
         .rR2_data (id_rs2_data)
     );
 
+    `ifdef NPC_TEST
+    // ==========================================
+    // 🌟 终极修复：DiffTest 指令提交同步逻辑
+    // ==========================================
+    // 将 EX 阶段的 valid 和 pc 顺着流水线打 3 拍，同步到 WB 阶段
+    logic        mem1_valid, mem2_valid, wb_valid;
+    logic [31:0] mem1_pc,    mem2_pc,    wb_pc;
+
+    always_ff @(posedge cpu_clk) begin
+        if (cpu_rst) begin
+            mem1_valid <= 0; mem2_valid <= 0; wb_valid <= 0;
+            mem1_pc    <= 0; mem2_pc    <= 0; wb_pc    <= 0;
+        end else begin
+            // 因为你的设计中 EX 之后没有 stall 和 flush，所以直接无脑打拍即可！
+            mem1_valid <= ex_valid;
+            mem1_pc    <= ex_pc;
+
+            mem2_valid <= mem1_valid;
+            mem2_pc    <= mem1_pc;
+
+            wb_valid   <= mem2_valid;
+            wb_pc      <= mem2_pc;
+        end
+    end
+    `endif
+
 endmodule

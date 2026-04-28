@@ -44,7 +44,8 @@ VERILATOR_CFLAGS += -Wall --sv -MMD --build -cc -O3 \
                     -I$(INC_PATH) \
 					-Wno-DECLFILENAME \
                     -Wno-UNUSEDSIGNAL \
-					-Wno-PROCASSINIT
+					-Wno-PROCASSINIT \
+					-LDFLAGS -ldl
 					
 
 # ============================================================================

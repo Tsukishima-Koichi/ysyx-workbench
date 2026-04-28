@@ -13,7 +13,11 @@ module cpu(
     output logic [31:0] pc,
     output logic [31:0] inst,
     output logic        halt_req,
-    output logic        dead_loop
+    output logic        dead_loop,
+
+    // 🌟 新增：给 DiffTest 用的“指令提交”探针
+    output logic        commit_valid, 
+    output logic [31:0] commit_pc
 );
     // 线缆声明
     logic [31:0] irom_addr;
@@ -85,20 +89,24 @@ module cpu(
     //          因为流水线 flush 时会将 ex_JmpType 清零，所以此判断免疫流水线气泡
     assign dead_loop = (u_myCPU.ex_pc == 32'h8000_0010) && (u_myCPU.ex_JmpType == 2'b01);
 
+    // 🌟 将探针连向刚刚在 myCPU 里写好的 WB 阶段信号
+    assign commit_valid = u_myCPU.wb_valid;
+    assign commit_pc    = u_myCPU.wb_pc;
+
     // ====================================================
     // 🌟 打印标准的 Spike 格式 Trace 日志
     // ====================================================
-    `ifdef TRACE_TEST
-    always_ff @(posedge clk) begin
-        if (!rst) begin
-            // ⚠️ 必须判断 valid 信号！
-            // 这样如果是由于分支预测失败导致流水线 Flush 产生的“气泡”，
-            // 就不会被错误地打印出来了，完美匹配 Spike 只有真实执行指令的特性！
-            if (u_myCPU.ex_valid) begin
-                $display("core 0: 0x%08x (0x%08x)", u_myCPU.ex_pc, u_myCPU.ex_inst); 
-            end
-        end
-    end
-    `endif
+    // `ifdef TRACE_TEST
+    // always_ff @(posedge clk) begin
+    //     if (!rst) begin
+    //         // ⚠️ 必须判断 valid 信号！
+    //         // 这样如果是由于分支预测失败导致流水线 Flush 产生的“气泡”，
+    //         // 就不会被错误地打印出来了，完美匹配 Spike 只有真实执行指令的特性！
+    //         if (u_myCPU.ex_valid) begin
+    //             $display("core 0: 0x%08x (0x%08x)", u_myCPU.ex_pc, u_myCPU.ex_inst); 
+    //         end
+    //     end
+    // end
+    // `endif
 
 endmodule

@@ -7,12 +7,35 @@
 #include "Vcpu.h"
 #include "memory.h"  // 引入内存和加载模块
 
-
 // #define GEN_WAVEFORM  // 定义宏以启用波形生成
 // #define MAX_CYCLES 5000  // 定义最大仿真周期数，防止死循环
+#define NEMU_TRACE
 
 #ifdef GEN_WAVEFORM
 #include "verilated_vcd_c.h"  // 引入波形导出相关的头文件
+#endif
+
+
+#ifdef NEMU_TRACE
+#include <dlfcn.h>
+#include <assert.h>
+
+// 🌟 新增：显式定义 NEMU 约定的拷贝方向常量
+#define DIFFTEST_TO_DUT 0
+#define DIFFTEST_TO_REF 1
+// ⚠️ 注意：如果你改完重新编译还是报 assert(0)，请把上面两个数字互换 (DUT 改 1，REF 改 0)！
+
+struct CPU_state {
+    uint32_t gpr[32];
+    uint32_t pc;
+    uint32_t padding[16]; // 🌟 修复坑 1：塞入 64 字节的防爆垫，专门用来吸收 NEMU 尾部的 CSR 垃圾数据
+};
+
+// 🌟 修改：把原来参数里的 bool direction 全都改成 int direction
+void (*nemu_difftest_memcpy)(uint32_t addr, void *buf, size_t n, int direction);
+void (*nemu_difftest_regcpy)(void *dut, int direction);
+void (*nemu_difftest_exec)(uint64_t n);
+void (*nemu_difftest_init)(void);
 #endif
 
 svScope regfile_scope = NULL;
@@ -34,6 +57,24 @@ int main(int argc, char** argv) {
     VerilatedVcdC* tfp = new VerilatedVcdC;
     top->trace(tfp, 99);                  // 99 表示追踪所有的层级深度
     tfp->open("build/wave.vcd");          // 将波形文件输出到 build 目录下
+    #endif
+
+    #ifdef NEMU_TRACE
+    // 🌟 1. 加载 NEMU 动态库 (请替换为你的实际 .so 路径)
+    void *handle = dlopen("../nemu/build/riscv32-nemu-interpreter-so", RTLD_LAZY);
+    if (!handle) {
+        printf("Error loading NEMU: %s\n", dlerror());
+        return -1;
+    }
+
+    // 🌟 2. 获取 NEMU API
+    // 注意这里最后的参数类型换成了 int
+    nemu_difftest_memcpy = (void (*)(uint32_t, void *, size_t, int))dlsym(handle, "difftest_memcpy");
+    nemu_difftest_regcpy = (void (*)(void *, int))dlsym(handle, "difftest_regcpy");
+    nemu_difftest_exec   = (void (*)(uint64_t))dlsym(handle, "difftest_exec");
+    nemu_difftest_init   = (void (*)(void))dlsym(handle, "difftest_init");
+
+    assert(nemu_difftest_memcpy && nemu_difftest_regcpy && nemu_difftest_exec && nemu_difftest_init);
     #endif
 
     memset(pmem, 0, PMEM_SIZE);
@@ -61,6 +102,24 @@ int main(int argc, char** argv) {
     if (dram_file != NULL) {
         load_image(dram_file, dram_addr);       // DRAM 加载到 0x80100000
     }
+
+    #ifdef NEMU_TRACE
+    // 🌟 3. 初始化 NEMU，并把你的 PMEM 完整拷贝给 NEMU
+    nemu_difftest_init(); 
+    
+    // 🌟 修改：把 true 换成 DIFFTEST_TO_REF
+    nemu_difftest_memcpy(0x80000000, pmem, PMEM_SIZE, DIFFTEST_TO_REF); 
+
+    CPU_state initial_state = {0};
+    initial_state.pc = 0x80000000;
+    
+    // 🌟 修改：把 true 换成 DIFFTEST_TO_REF
+    nemu_difftest_regcpy(&initial_state, DIFFTEST_TO_REF);
+
+    // 🌟 新增：在 while 循环外部定义这两个变量，用来做跨周期的延迟检查
+    bool difftest_check_pending = false;
+    uint32_t difftest_check_pc = 0;
+    #endif
 
     top->clk = 0; top->rst = 1; top->eval();
     top->clk = 1; top->eval();
@@ -92,6 +151,49 @@ int main(int argc, char** argv) {
         #endif
 
         cycles++;
+
+        #ifdef NEMU_TRACE
+        // 🌟 第一步：先检查“上一拍”要求验证的寄存器状态
+        // 因为刚刚经历了 top->clk = 1，此时数据已经确确实实写进 RF.sv 里面了！
+        if (difftest_check_pending) {
+            CPU_state ref_r;
+            nemu_difftest_regcpy(&ref_r, DIFFTEST_TO_DUT);
+
+            if (regfile_scope != NULL) {
+                svSetScope(regfile_scope);
+                for (int i = 0; i < 32; i++) {
+                    uint32_t dut_val = (uint32_t)get_gpr(i);
+                    if (dut_val != ref_r.gpr[i]) {
+                        printf("\n\33[1;31m[DiffTest Error] Register x%d Mismatch at PC=0x%08x!\33[0m\n", i, difftest_check_pc);
+                        printf("DUT x%d = 0x%08x | NEMU x%d = 0x%08x\n", i, dut_val, i, ref_r.gpr[i]);
+                        return 1;
+                    }
+                }
+            }
+            // 检查通过，清除预约标志
+            difftest_check_pending = false;
+        }
+
+        // 🌟 第二步：如果当前拍有一条指令在 WB 阶段准备写回
+        if (top->commit_valid) {
+            CPU_state ref_r;
+            nemu_difftest_regcpy(&ref_r, DIFFTEST_TO_DUT);
+
+            // 对比 PC 值 (PC 在提交前比对是完全准的，因为当前指令刚执行)
+            if (ref_r.pc != top->commit_pc) {
+                printf("\n\33[1;31m[DiffTest Error] PC Mismatch!\33[0m\n");
+                printf("DUT PC: 0x%08x | NEMU PC: 0x%08x\n", top->commit_pc, ref_r.pc);
+                return 1; 
+            }
+
+            // 让 NEMU 严格执行 1 条指令
+            nemu_difftest_exec(1);
+
+            // ⚠️ 关键动作：预约在下一拍检查寄存器
+            difftest_check_pending = true;
+            difftest_check_pc = top->commit_pc;
+        }
+        #endif
 
         // ==========================================
         // 🌟 新增：每 1000 个周期打印一次进度，\r 保证只在同一行刷新
