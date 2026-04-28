@@ -13,3 +13,6 @@
 `define MISC_MEM 7'b000_1111 // fence, fence.tso, pause
 
 `define OPCODE_LEN 7
+
+// `define TRACE_TEST
+`define NPC_TEST

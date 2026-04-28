@@ -17,7 +17,8 @@ module BranchUnit #(
     input  logic [2:0]           funct3,
     
     output logic [DATAWIDTH-1:0] next_pc,
-    output logic [DATAWIDTH-1:0] pc_plus_4
+    output logic [DATAWIDTH-1:0] pc_plus_4,
+    output logic                 actual_taken // 🌟 新增：直接输出是否发生真实跳转
 );
     // 直接透传，无需再算加法
     assign pc_plus_4 = precalc_pc_plus_4;
@@ -43,6 +44,9 @@ module BranchUnit #(
             endcase
         end
     end
+
+    // 🌟 新增：纯布尔逻辑判断，零延迟代价，取代外部的 32位 != 比较器！
+    assign actual_taken = (Jump != 2'b00) || (Branch && take_branch);
     
     logic [DATAWIDTH-1:0] jalr_target;
     // JALR 的加法必须保留，因为它依赖 RS1

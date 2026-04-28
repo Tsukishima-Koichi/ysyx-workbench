@@ -5,7 +5,6 @@ module BranchPredictor #(
     parameter INDEX_BITS = 10 // 升级到 1024 项表！BRAM 毫无压力
 )(
     input  logic                clk,
-    input  logic                rst,
     
     // --- IF1 阶段发送查询地址 ---
     input  logic [PC_WIDTH-1:0] if1_pc,
@@ -41,6 +40,17 @@ module BranchPredictor #(
     logic [1:0]                     read_bht;
 
     // ----------------------------------------
+    // 🌟 新增：利用 initial 块进行 BRAM 数组上电初始化
+    // 这在 FPGA 综合和 Verilator 仿真中都是合法且推荐的
+    // ----------------------------------------
+    initial begin
+        for (int i = 0; i < TABLE_SIZE; i++) begin
+            btb_valid[i]   = 1'b0;
+            bht_counter[i] = 2'b00;
+        end
+    end
+
+    // ----------------------------------------
     // 1. 同步读取机制 (推断 BRAM 的关键)
     // ----------------------------------------
     always_ff @(posedge clk) begin
@@ -63,9 +73,7 @@ module BranchPredictor #(
     // 3. EX 阶段更新逻辑
     // ----------------------------------------
     always_ff @(posedge clk) begin
-        if (rst) begin
-            for (int i = 0; i < TABLE_SIZE; i++) btb_valid[i] <= 1'b0; // 仅复位 valid 即可
-        end else if (ex_is_branch) begin
+        if (ex_is_branch) begin
             btb_valid[ex_idx]  <= 1'b1;
             btb_tag[ex_idx]    <= ex_tag;
             btb_target[ex_idx] <= ex_actual_target;

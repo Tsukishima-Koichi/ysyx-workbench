@@ -48,28 +48,54 @@ extern "C" void pmem_write(int waddr, int wdata, char wmask) {
 }
 
 // 镜像加载逻辑
-void load_image(const char* img_path) {
+// 镜像加载逻辑改进版：完美支持 .bin 二进制文件和 .hex 文件
+void load_image(const char* img_path, uint32_t load_addr) {
     if (img_path == NULL) return;
-    FILE *fp = fopen(img_path, "r");
+    
+    // 🌟 关键修改：将 "r" 改为 "rb"，以二进制模式打开文件，防止读取 .bin 遇到特殊字符截断
+    FILE *fp = fopen(img_path, "rb"); 
     if (!fp) {
         printf("\33[1;31mERROR: Cannot open image %s\33[0m\n", img_path);
         assert(0);
     }
+
+    // 检查加载地址是否越界
+    if (load_addr < PMEM_BASE || load_addr >= PMEM_BASE + PMEM_SIZE) {
+        printf("\33[1;31mERROR: Load address 0x%08x is out of memory bounds\33[0m\n", load_addr);
+        assert(0);
+    }
+    
+    // 计算在 pmem 数组中的实际偏移量
+    uint32_t base_offset = load_addr - PMEM_BASE;
+
+    // 如果文件名包含 .hex，则按文本十六进制读取
     if (strstr(img_path, ".hex") != NULL) {
-        uint32_t inst, offset = 0;
+        uint32_t inst;
+        uint32_t loaded_bytes = 0;
+        // 把数据写入对应的偏移位置
         while (fscanf(fp, "%x", &inst) == 1) {
-            *((uint32_t*)(pmem + offset)) = inst;
-            offset += 4;
+            if (base_offset + loaded_bytes >= PMEM_SIZE) break; // 防止越界
+            *((uint32_t*)(pmem + base_offset + loaded_bytes)) = inst;
+            loaded_bytes += 4;
         }
-        printf("[C++] Loaded %d bytes from .hex file\n", offset);
-    } else {
+        printf("[C++] Loaded %u bytes from .hex file to 0x%08x\n", loaded_bytes, load_addr);
+    } 
+    // 否则一律按照原始二进制文件 (.bin) 读取
+    else {
         fseek(fp, 0, SEEK_END);
         long size = ftell(fp);
         fseek(fp, 0, SEEK_SET);
-        if (size > PMEM_SIZE) size = PMEM_SIZE;
-        size_t ret = fread(pmem, size, 1, fp);
-        assert(ret == 1);
-        printf("[C++] Loaded %ld bytes from .bin file\n", size);
+        
+        if (base_offset + size > PMEM_SIZE) size = PMEM_SIZE - base_offset;
+        
+        // 直接将整个文件的数据块读入内存
+        size_t ret = fread(pmem + base_offset, size, 1, fp);
+        
+        // 如果文件非空，要求 fread 成功读取 1 个大块
+        if (size > 0) {
+            assert(ret == 1);
+        }
+        printf("[C++] Loaded %ld bytes from .bin file to 0x%08x\n", size, load_addr);
     }
     fclose(fp);
 }

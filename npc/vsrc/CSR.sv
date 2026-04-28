@@ -18,7 +18,11 @@ module CSR #(
     output logic [DATAWIDTH-1:0] trap_pc  // 给 BranchUnit 的跳转地址
 );
     // RISC-V M-Mode 最核心的四个状态寄存器
-    logic [31:0] mstatus, mtvec, mepc, mcause;
+    // 修改后：声明即赋初值 (完美兼容综合与仿真)
+    logic [31:0] mstatus = 32'h1800;
+    logic [31:0] mtvec   = 32'h0;
+    logic [31:0] mepc    = 32'h0;
+    logic [31:0] mcause  = 32'h0;
 
     // ==========================================
     // 1. 读出 CSR 的老数据 (异步纯组合逻辑)
@@ -54,10 +58,8 @@ module CSR #(
     // ==========================================
     always_ff @(posedge clk) begin
         if (rst) begin
-            mstatus <= 32'h1800; // 默认 M 模式开启
-            mtvec   <= 32'h0;
-            mepc    <= 32'h0;
-            mcause  <= 32'h0;
+            // 🌟 魔法：只复位最核心的状态机控制寄存器
+            mstatus <= 32'h1800;
         end else begin
             // 优先级 1: ecall 触发异常陷阱
             if (ecall) begin

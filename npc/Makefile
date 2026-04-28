@@ -43,12 +43,17 @@ VERILATOR_CFLAGS += -Wall --sv -MMD --build -cc -O3 \
                     --x-assign fast --x-initial fast \
                     -I$(INC_PATH) \
 					-Wno-DECLFILENAME \
-                    -Wno-UNUSEDSIGNAL 
+                    -Wno-UNUSEDSIGNAL \
+					-Wno-PROCASSINIT
 					
 
 # ============================================================================
 # 4. 核心编译与运行规则
 # ============================================================================
+# 新增：定义默认的 bin 文件路径和起始地址 (?= 表示可被终端环境变量覆盖)
+IROM_BIN  ?= ./bin/test_src/irom.bin
+DRAM_BIN  ?= ./bin/test_src/dram.bin
+DRAM_ADDR ?= 80100000
 
 # 默认目标设为 sim
 default: sim
@@ -66,7 +71,7 @@ $(BIN): $(VSRCS) $(CSRCS)
 sim: $(BIN)
 	$(call git_commit, "sim RTL") # DO NOT REMOVE THIS LINE!!!
 	@echo "====== 2. Running Simulation ======"
-	@$(BIN) $(IMG)
+	@$(BIN) $(IMG) -i $(IROM_BIN) -d $(DRAM_BIN) -a $(DRAM_ADDR)
 
 # 清理规则
 clean:

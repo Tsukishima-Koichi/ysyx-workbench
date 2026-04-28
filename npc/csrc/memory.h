@@ -12,6 +12,7 @@
 
 // 暴露物理内存指针和加载函数给主函数
 extern uint8_t pmem[PMEM_SIZE];
-void load_image(const char* img_path);
+// 👇 这里的函数声明必须加上 load_addr 参数！
+void load_image(const char* img_path, uint32_t load_addr = PMEM_BASE);
 
 #endif

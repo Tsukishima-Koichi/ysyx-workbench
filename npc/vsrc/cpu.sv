@@ -1,5 +1,6 @@
 // vsrc/cpu.sv
 `timescale 1ns / 1ps
+`include "defines.sv"
 
 // 导入 C++ 中的内存读写函数
 import "DPI-C" context function int pmem_read(input int raddr);
@@ -11,7 +12,8 @@ module cpu(
 
     output logic [31:0] pc,
     output logic [31:0] inst,
-    output logic        halt_req
+    output logic        halt_req,
+    output logic        dead_loop
 );
     // 线缆声明
     logic [31:0] irom_addr;
@@ -73,9 +75,30 @@ module cpu(
     // ====================================================
     // 🌟 核心修复 3：修复 myCPU 内部信号引用错误及测试探针
     // ====================================================
-    // 修改为 myCPU 中实际存在的信号，此处暴露 EX 阶段因为 ebreak 也是在 EX 判定的
-    assign pc       = u_myCPU.ex_pc;       
+    assign pc       = u_myCPU.ex_pc;
     assign inst     = u_myCPU.id_inst;     
     assign halt_req = u_myCPU.ex_IsEbreak;
+
+    // 🌟 新增：精准检测程序是否正常结束
+    // 条件：1. 处于 EX 阶段的 PC 为 0x80000010
+    //       2. EX 阶段的指令是有效的 JAL 指令 (JmpType == 2'b01) 
+    //          因为流水线 flush 时会将 ex_JmpType 清零，所以此判断免疫流水线气泡
+    assign dead_loop = (u_myCPU.ex_pc == 32'h8000_0010) && (u_myCPU.ex_JmpType == 2'b01);
+
+    // ====================================================
+    // 🌟 打印标准的 Spike 格式 Trace 日志
+    // ====================================================
+    `ifdef TRACE_TEST
+    always_ff @(posedge clk) begin
+        if (!rst) begin
+            // ⚠️ 必须判断 valid 信号！
+            // 这样如果是由于分支预测失败导致流水线 Flush 产生的“气泡”，
+            // 就不会被错误地打印出来了，完美匹配 Spike 只有真实执行指令的特性！
+            if (u_myCPU.ex_valid) begin
+                $display("core 0: 0x%08x (0x%08x)", u_myCPU.ex_pc, u_myCPU.ex_inst); 
+            end
+        end
+    end
+    `endif
 
 endmodule
