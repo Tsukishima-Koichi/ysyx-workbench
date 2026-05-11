@@ -25,12 +25,14 @@ typedef struct {
   // 2. 物理 PC
   vaddr_t pc; 
 
+// 修改 25-30 行附近的结构体定义
   // 3. CSR 寄存器组 (把它们放在一起，就像物理芯片上的布局一样)
   struct {
     word_t mepc;
     word_t mcause;
     word_t mtvec;
     word_t mstatus;
+    word_t mscratch;  // 🌟 新增：mscratch 寄存器
   } csr; // 这样写 cpu.csr.mepc 更有组织感
 
 } MUXDEF(CONFIG_RV64, riscv64_CPU_state, riscv32_CPU_state);

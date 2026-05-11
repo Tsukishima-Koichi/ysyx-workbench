@@ -23,21 +23,24 @@ const char *regs[] = {
   "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"
 };
 
-// reg.c
+// 修改 1: csr_read 函数增加 0x340 分支
 word_t csr_read(word_t csr_addr) {
   switch (csr_addr) {
     case 0x300: return cpu.csr.mstatus;
     case 0x305: return cpu.csr.mtvec;
+    case 0x340: return cpu.csr.mscratch; // 🌟 新增读
     case 0x341: return cpu.csr.mepc;
     case 0x342: return cpu.csr.mcause;
     default: return 0; 
   }
 }
 
+// 修改 2: csr_write 函数增加 0x340 分支
 void csr_write(word_t csr_addr, word_t val) {
   switch (csr_addr) {
     case 0x300: cpu.csr.mstatus = val; break;
     case 0x305: cpu.csr.mtvec = val; break;
+    case 0x340: cpu.csr.mscratch = val; break; // 🌟 新增写
     case 0x341: cpu.csr.mepc = val; break;
     case 0x342: cpu.csr.mcause = val; break;
     default: break;
@@ -69,6 +72,7 @@ word_t isa_reg_str2val(const char *s, bool *success) {
   // 支持通过名字读取 CSR
   if (strcmp(s, "mstatus") == 0) { *success = true; return cpu.csr.mstatus; }
   if (strcmp(s, "mtvec") == 0) { *success = true; return cpu.csr.mtvec; }
+  if (strcmp(s, "mscratch") == 0) { *success = true; return cpu.csr.mscratch; } // 🌟 新增名称匹配
   if (strcmp(s, "mepc") == 0) { *success = true; return cpu.csr.mepc; }
   if (strcmp(s, "mcause") == 0) { *success = true; return cpu.csr.mcause; }
 

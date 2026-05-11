@@ -8,7 +8,7 @@
 #include "memory.h"  // 引入内存和加载模块
 
 // #define GEN_WAVEFORM  // 定义宏以启用波形生成
-// #define MAX_CYCLES 5000  // 定义最大仿真周期数，防止死循环
+// #define MAX_CYCLES 50000  // 定义最大仿真周期数，防止死循环
 #define NEMU_TRACE
 
 #ifdef GEN_WAVEFORM
@@ -60,6 +60,7 @@ int main(int argc, char** argv) {
     #endif
 
     #ifdef NEMU_TRACE
+    printf("DiffTest tracing enabled. NEMU API will be loaded dynamically.\n");
     // 🌟 1. 加载 NEMU 动态库 (请替换为你的实际 .so 路径)
     void *handle = dlopen("../nemu/build/riscv32-nemu-interpreter-so", RTLD_LAZY);
     if (!handle) {
@@ -166,6 +167,13 @@ int main(int argc, char** argv) {
                     if (dut_val != ref_r.gpr[i]) {
                         printf("\n\33[1;31m[DiffTest Error] Register x%d Mismatch at PC=0x%08x!\33[0m\n", i, difftest_check_pc);
                         printf("DUT x%d = 0x%08x | NEMU x%d = 0x%08x\n", i, dut_val, i, ref_r.gpr[i]);
+
+                        #ifdef GEN_WAVEFORM
+                        if (tfp) {
+                            tfp->close();
+                        }
+                        #endif
+
                         return 1;
                     }
                 }
@@ -183,6 +191,13 @@ int main(int argc, char** argv) {
             if (ref_r.pc != top->commit_pc) {
                 printf("\n\33[1;31m[DiffTest Error] PC Mismatch!\33[0m\n");
                 printf("DUT PC: 0x%08x | NEMU PC: 0x%08x\n", top->commit_pc, ref_r.pc);
+
+                #ifdef GEN_WAVEFORM
+                if (tfp) {
+                    tfp->close();
+                }
+                #endif
+
                 return 1; 
             }
 
@@ -205,7 +220,7 @@ int main(int argc, char** argv) {
         }
 
         // ==========================================
-        // 🌟 修改：检测程序是否进入了死循环 (基于安全信号 dead_loop)
+        // 检测程序是否进入了死循环 (基于安全信号 dead_loop)
         // ==========================================
         if (top->dead_loop) {
             printf("\n\n[Halt] Program finished and entered infinite loop at PC=0x80000010 after %u cycles!\n", cycles);
@@ -224,17 +239,6 @@ int main(int argc, char** argv) {
         if (top->halt_req) {
 
             printf("\n[Halt] ebreak detected after %d cycles\n", cycles);
-
-            // ==========================================
-            // 🌟 在这里加入内存探针，无论 Good 还是 Bad 都能看到最终的内存状态
-            // ==========================================
-            uint32_t offset_20 = 0x80200020 - 0x80000000; // 计算 0x80200020 的数组偏移
-            uint32_t offset_40 = 0x80200040 - 0x80000000; // 计算 0x80200040 的数组偏移
-            
-            printf("\n========== Memory Dump ==========\n");
-            printf("Mem[0x80200020] = 0x%08X\n", *((uint32_t*)(pmem + offset_20)));
-            printf("Mem[0x80200040] = 0x%08X\n", *((uint32_t*)(pmem + offset_40)));
-            printf("=================================\n\n");
             
             if (regfile_scope != NULL) {
                 svSetScope(regfile_scope);

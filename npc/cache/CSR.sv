@@ -18,11 +18,11 @@ module CSR #(
     output logic [DATAWIDTH-1:0] trap_pc  // 给 BranchUnit 的跳转地址
 );
     // RISC-V M-Mode 最核心的四个状态寄存器
+    // 修改后：声明即赋初值 (完美兼容综合与仿真)
     logic [31:0] mstatus = 32'h1800;
     logic [31:0] mtvec   = 32'h0;
     logic [31:0] mepc    = 32'h0;
     logic [31:0] mcause  = 32'h0;
-    logic [31:0] mscratch= 32'h0;  // 🌟 新增 mscratch
 
     // ==========================================
     // 1. 读出 CSR 的老数据 (异步纯组合逻辑)
@@ -31,7 +31,6 @@ module CSR #(
         case(csr_idx)
             12'h300: rdata = mstatus;
             12'h305: rdata = mtvec;
-            12'h340: rdata = mscratch; // 🌟 新增读分支
             12'h341: rdata = mepc;
             12'h342: rdata = mcause;
             default: rdata = 32'b0;
@@ -85,7 +84,6 @@ module CSR #(
                 case(csr_idx)
                     12'h300: mstatus <= next_csr_val;
                     12'h305: mtvec   <= next_csr_val;
-                    12'h340: mscratch <= next_csr_val; // 🌟 新增写分支
                     12'h341: mepc    <= next_csr_val;
                     12'h342: mcause  <= next_csr_val;
                     default: ; // <--- 加上这行，兜底所有未定义的情况

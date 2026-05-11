@@ -180,12 +180,23 @@ static int decode_exec(Decode *s) {
 
   // ================= Zicsr 扩展指令 (系统/特权) =================
   
-  // csrrw (CSR Read/Write): 把 CSR 的旧值读入 rd，把 src1 写进 CSR
+  // 1. csrrw (CSR Read/Write): 寄存器操作数
   INSTPAT("??????? ????? ????? 001 ????? 11100 11", csrrw  , I, word_t csr = BITS(s->isa.inst, 31, 20); word_t t = csr_read(csr); csr_write(csr, src1); R(rd) = t);
   
-  // csrrs (CSR Read and Set): 把 CSR 的旧值读入 rd，然后把 CSR 原来的值和 src1 按位或，再写回 CSR
-  // (如果 rs1 = x0，那就相当于纯粹的读 CSR 操作)
+  // 2. csrrs (CSR Read and Set): 寄存器操作数
   INSTPAT("??????? ????? ????? 010 ????? 11100 11", csrrs  , I, word_t csr = BITS(s->isa.inst, 31, 20); word_t t = csr_read(csr); csr_write(csr, t | src1); R(rd) = t);
+
+  // 3. csrrc (CSR Read and Clear): 寄存器操作数
+  INSTPAT("??????? ????? ????? 011 ????? 11100 11", csrrc  , I, word_t csr = BITS(s->isa.inst, 31, 20); word_t t = csr_read(csr); csr_write(csr, t & ~src1); R(rd) = t);
+
+  // 4. csrrwi (CSR Read/Write Immediate): 5位无符号立即数 (zimm)
+  INSTPAT("??????? ????? ????? 101 ????? 11100 11", csrrwi , I, word_t csr = BITS(s->isa.inst, 31, 20); word_t zimm = BITS(s->isa.inst, 19, 15); word_t t = csr_read(csr); csr_write(csr, zimm); R(rd) = t);
+  
+  // 5. csrrsi (CSR Read and Set Immediate): 5位无符号立即数 (zimm)
+  INSTPAT("??????? ????? ????? 110 ????? 11100 11", csrrsi , I, word_t csr = BITS(s->isa.inst, 31, 20); word_t zimm = BITS(s->isa.inst, 19, 15); word_t t = csr_read(csr); csr_write(csr, t | zimm); R(rd) = t);
+
+  // 6. csrrci (CSR Read and Clear Immediate): 5位无符号立即数 (zimm)
+  INSTPAT("??????? ????? ????? 111 ????? 11100 11", csrrci , I, word_t csr = BITS(s->isa.inst, 31, 20); word_t zimm = BITS(s->isa.inst, 19, 15); word_t t = csr_read(csr); csr_write(csr, t & ~zimm); R(rd) = t);
 
   // ================= 系统异常返回指令 =================
 

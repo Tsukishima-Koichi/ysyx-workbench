@@ -76,6 +76,13 @@ bool isa_difftest_checkregs(CPU_state *ref_r, vaddr_t pc) {
     return false;
   }
 
+  // 🌟 新增：比对 mscratch
+  if (cpu.csr.mscratch != ref_r->csr.mscratch) {
+    printf("🚨 [Difftest] CSR Mismatch (mscratch) at PC = 0x%08x\n", pc);
+    printf("DUT mscratch = 0x%08x, REF mscratch = 0x%08x\n", cpu.csr.mscratch, ref_r->csr.mscratch);
+    return false;
+  }
+
   return true;
 }
 
