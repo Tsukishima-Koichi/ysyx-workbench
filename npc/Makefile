@@ -32,6 +32,29 @@ INC_PATH = $(abspath ./vsrc)
 
 VERILATOR = verilator
 
+# --- C++ 编译参数与宏定义控制区 ---
+# 默认关闭 波形(WAVE) 和 DiffTest(TRACE)，设置最大周期
+WAVE ?= 0
+TRACE ?= 1
+MAX_CYCLES ?= 0
+
+# 将 csrc 目录加入 C++ 的头文件搜索路径
+CXXFLAGS = -I$(abspath ./csrc)
+
+# 根据开关，动态生成 GCC 的 -D 参数 (等价于代码里的 #define)
+ifeq ($(WAVE), 1)
+CXXFLAGS += -DGEN_WAVEFORM
+endif
+
+ifeq ($(TRACE), 1)
+CXXFLAGS += -DNEMU_TRACE
+endif
+
+ifneq ($(MAX_CYCLES), 0)
+CXXFLAGS += -DMAX_CYCLES=$(MAX_CYCLES)
+endif
+# ----------------------------------------
+
 # 核心编译参数融合：
 # -Wall: 开启所有警告
 # --sv: 支持 SystemVerilog
@@ -45,15 +68,16 @@ VERILATOR_CFLAGS += -Wall --sv -MMD --build -cc -O3 \
 					-Wno-DECLFILENAME \
                     -Wno-UNUSEDSIGNAL \
 					-Wno-PROCASSINIT \
-					-LDFLAGS -ldl
+					-LDFLAGS -ldl \
+					-CFLAGS "$(CXXFLAGS)"  # 🌟 新增：把 C++ 的宏定义和头文件路径传给底层的 GCC
 					
 
 # ============================================================================
 # 4. 核心编译与运行规则
 # ============================================================================
 # 新增：定义默认的 bin 文件路径和起始地址 (?= 表示可被终端环境变量覆盖)
-IROM_BIN  ?= ./bin/withoutMext/irom.bin
-DRAM_BIN  ?= ./bin/withoutMext/dram.bin
+IROM_BIN  ?= ./bin/withMext/irom.bin
+DRAM_BIN  ?= ./bin/withMext/dram.bin
 DRAM_ADDR ?= 80100000
 
 # 默认目标设为 sim

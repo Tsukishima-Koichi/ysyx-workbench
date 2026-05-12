@@ -76,6 +76,8 @@ module ID_EX_Reg #(parameter DATAWIDTH = 32)(
     input  logic [2:0] id_funct3,
     input  logic [1:0] id_forward_A, id_forward_B, 
     input  logic [DATAWIDTH-1:0] id_branch_target, 
+    input  logic                 id_is_M,   // 🌟 新增传入
+    
 
     // CSR
     input  logic [11:0] id_csr_idx,
@@ -100,6 +102,7 @@ module ID_EX_Reg #(parameter DATAWIDTH = 32)(
     output logic [2:0] ex_funct3,
     output logic [1:0] ex_forward_A, ex_forward_B,
     output logic [DATAWIDTH-1:0] ex_branch_target,
+    output logic                 ex_is_M,   // 🌟 新增传出
 
     // CSR
     output logic [11:0] ex_csr_idx,
@@ -116,6 +119,7 @@ module ID_EX_Reg #(parameter DATAWIDTH = 32)(
             {ex_IsEcall, ex_IsEbreak, ex_IsMret} <= 0;
             ex_CsrOp <= 0;
             ex_valid <= 1'b0;  // 🌟 复位时清零
+            ex_is_M <= 1'b0; // 🌟 增加复位
         end else if (flush) begin
             ex_rd <= 0;
             {ex_RegWen, ex_MemWen, ex_IsBranch, ex_AluSrcB} <= 0;
@@ -124,6 +128,7 @@ module ID_EX_Reg #(parameter DATAWIDTH = 32)(
             {ex_IsEcall, ex_IsEbreak, ex_IsMret} <= 0;
             ex_CsrOp <= 0;
             ex_valid <= 1'b0;  // 🌟 冲刷流水线时，将指令标为无效(气泡)
+            ex_is_M <= 1'b0; // 🌟 增加冲刷
         end else if (!stall) begin
             ex_rd <= id_rd;
             {ex_RegWen, ex_MemWen, ex_IsBranch, ex_AluSrcB} <= {id_RegWen, id_MemWen, id_IsBranch, id_AluSrcB};
@@ -132,6 +137,7 @@ module ID_EX_Reg #(parameter DATAWIDTH = 32)(
             {ex_IsEcall, ex_IsEbreak, ex_IsMret} <= {id_IsEcall, id_IsEbreak, id_IsMret};
             ex_CsrOp <= id_CsrOp;
             ex_valid <= id_valid; // 🌟 正常运行时，传递有效信号
+            ex_is_M <= id_is_M; // 🌟 增加传递
         end
     end
 

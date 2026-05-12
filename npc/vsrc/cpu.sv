@@ -83,11 +83,15 @@ module cpu(
     assign inst     = u_myCPU.id_inst;     
     assign halt_req = u_myCPU.ex_IsEbreak;
 
-    // 🌟 新增：精准检测程序是否正常结束
-    // 条件：1. 处于 EX 阶段的 PC 为 0x80000010
-    //       2. EX 阶段的指令是有效的 JAL 指令 (JmpType == 2'b01) 
-    //          因为流水线 flush 时会将 ex_JmpType 清零，所以此判断免疫流水线气泡
-    assign dead_loop = (u_myCPU.ex_pc == 32'h8000_0010) && (u_myCPU.ex_JmpType == 2'b01);
+    // 🌟 新增：精准检测程序是否正常结束 (通用版)
+    // 条件：
+    // 1. 指令有效 (免疫流水线气泡)
+    // 2. 是一条 JAL 指令
+    // 3. 它的跳转目标地址等于它自己当前的 PC (这就是 j . 死循环的本质！)
+    
+    assign dead_loop = u_myCPU.ex_valid && 
+                       (u_myCPU.ex_JmpType == 2'b01) && 
+                       (u_myCPU.ex_branch_target == u_myCPU.ex_pc);
 
     // 🌟 将探针连向刚刚在 myCPU 里写好的 WB 阶段信号
     assign commit_valid = u_myCPU.wb_valid;

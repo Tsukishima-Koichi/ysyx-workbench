@@ -38,7 +38,7 @@ module myCPU (
     // ID Stage
     logic [31:0] id_pc, id_inst, id_inst_raw;
     logic        id_valid;
-    logic [31:0] id_branch_target; // 从 ID 阶段算好的分支目标地址
+    logic [31:0] id_branch_target;
     logic [31:0] id_imm, id_rs1_data, id_rs2_data, id_ret_pc;
     logic        id_IsBranch, id_RegWen, id_MemWen, id_AluSrcB;
     logic [1:0]  id_JmpType, id_WbSel, id_AluSrcA;
@@ -53,7 +53,7 @@ module myCPU (
 
     // EX Stage
     logic [31:0] ex_pc, ex_rs1_data, ex_rs2_data, ex_imm, ex_ret_pc;
-    logic [31:0] ex_branch_target; // 修复：必须声明这根 32 位的线！
+    logic [31:0] ex_branch_target;
     logic [4:0]  ex_rd, ex_rs1, ex_rs2;
     logic        ex_RegWen, ex_MemWen, ex_IsBranch, ex_AluSrcB;
     logic [1:0]  ex_JmpType, ex_WbSel, ex_AluSrcA;
@@ -63,7 +63,7 @@ module myCPU (
     logic        ex_CsrWen, ex_CsrImmSel, ex_IsEcall, ex_IsEbreak, ex_IsMret;
     logic [1:0]  ex_CsrOp;
     logic [31:0] ex_csr_rdata;
-    logic [31:0] ex_csr_wdata;     // 修复：声明写 CSR 的 32 位线！
+    logic [31:0] ex_csr_wdata;     
     logic        ex_actual_csr_wen;
     logic [31:0] ex_alu_op1, ex_alu_op2, ex_alu_res;
     logic        ex_take_trap;
@@ -73,9 +73,9 @@ module myCPU (
     logic [31:0] ex_agu_res;
 
     `ifdef NPC_TEST
-    logic [31:0] ex_inst;  // 🌟 新增：承接 EX 阶段的机器码
+    logic [31:0] ex_inst;
     `endif
-    logic        ex_valid; // 🌟 新增：承接 EX 阶段的有效信号
+    logic        ex_valid;
     
     // --- EX阶段实际决断与预测验证信号 ---
     logic [31:0] ex_actual_target;
@@ -102,7 +102,7 @@ module myCPU (
     logic [2:0]  mem2_funct3;
     logic [31:0] mem2_rdata_align, mem2_rdata_ext;
     logic [31:0] mem2_final_data;
-    logic [31:0] mem2_fw_data; 
+    logic [31:0] mem2_fw_data;
 
     // WB Stage
     logic [31:0] wb_data;
@@ -118,18 +118,25 @@ module myCPU (
     logic stall_MEM, flush_EX_MEM;
     logic flush_MEM_WB;
     
-    // 🌟 添加 MAX_FANOUT 属性，强制 Vivado 复制寄存器/连线以降低扇出延迟
     (* MAX_FANOUT = "16" *) logic flush_IF1_IF2_net;
     (* MAX_FANOUT = "16" *) logic flush_IF2_ID_net;
     (* MAX_FANOUT = "16" *) logic flush_ID_EX_net;
     
-    assign stall_EX  = 1'b0;
+    // 🌟 增加：M 扩展相关信号
+    logic id_is_M, ex_is_M;
+    logic [31:0] mdu_res;
+    logic mdu_busy, mdu_done;
+    logic stall_req_mdu;
+    logic flush_EX_MEM1_net;
+
+    // 🌟 修改：响应 MDU 的 stall
+    assign stall_EX  = stall_req_mdu; 
     assign stall_MEM = 1'b0;
     assign flush_EX_MEM = 1'b0;
     assign flush_MEM_WB = 1'b0;
 
-    logic hd_stall_IF, hd_flush_ID_EX;
-
+    // 🌟 修改：重命名内部变量以防冲突
+    logic hd_stall_IF, hd_flush_ID_EX, hd_stall_ID;
     HazardDetectionUnit hd_inst (
         .id_rs1      (id_inst[19:15]),
         .id_rs2      (id_inst[24:20]),
@@ -137,27 +144,34 @@ module myCPU (
         .ex_RegWen   (ex_RegWen),
         .ex_WbSel    (ex_WbSel),
         .ex_rd       (ex_rd),
-        .mem1_WbSel   (mem1_WbSel),
-        .mem1_rd      (mem1_rd),
+        .mem1_WbSel  (mem1_WbSel),
+        .mem1_rd     (mem1_rd),
         .stall_IF    (hd_stall_IF),
-        .stall_ID    (stall_ID),
+        .stall_ID    (hd_stall_ID),  // 🌟 使用重命名后的线
         .flush_ID_EX (hd_flush_ID_EX)
     );
 
-    // Load-Use 冒险时，IF1 和 IF2 必须同时停顿
-    assign stall_IF1 = hd_stall_IF;
-    assign stall_IF2 = hd_stall_IF;
+    // 🌟 新增：MDU 需要 Stall 流水线的条件 (处于 EX 阶段的有效 M扩展除法指令 还没输出 done)
+    assign stall_req_mdu = ex_valid & ex_is_M & ex_funct3[2] & ~mdu_done;
+
+    // 🌟 修改：Load-Use 和 MDU 除法冲突时，所有前级全部停顿
+    assign stall_IF1 = hd_stall_IF | stall_req_mdu;
+    assign stall_IF2 = hd_stall_IF | stall_req_mdu;
+    assign stall_ID  = hd_stall_ID | stall_req_mdu;
+
+    // 🌟 新增：当 EX 被卡住时，向下游(MEM1)插入空指令(气泡)
+    assign flush_EX_MEM1_net = stall_req_mdu;
 
     /// 建立预测信号防火墙！只有 IF2 数据有效时，预测才算数
     wire valid_if2_pred_taken = if2_pred_taken && if2_valid;
 
-    // 🌟 冲刷逻辑核心更新：赋值给 _net 信号
+    // 冲刷逻辑核心更新：赋值给 _net 信号
     assign flush_IF1_IF2_net = ex_mispredict | ex_take_trap | (valid_if2_pred_taken & ~stall_IF2);
     assign flush_IF2_ID_net  = ex_mispredict | ex_take_trap;
     assign flush_ID_EX_net   = ex_mispredict | ex_take_trap | hd_flush_ID_EX;
 
     // 终极 PC 路由逻辑 
-// 🌟 修复：必须让异常和预测失败拥有最高优先级，强行打断任何 Stall！
+    // 必须让异常和预测失败拥有最高优先级，强行打断任何 Stall！
     assign actual_next_pc = ex_take_trap   ? trap_pc :
                             ex_mispredict  ? recovery_pc :
                             stall_IF1      ? if1_pc :
@@ -186,15 +200,14 @@ module myCPU (
     // ==========================================
     // Stage 2: IF2 (Instruction Fetch & Predict)
     // ==========================================
-    assign if2_inst = irom_data; 
+    assign if2_inst = irom_data;
 
     // 实例化高容量同步分支预测器 (1024 项)
     BranchPredictor #(32, 10) bp_inst (
         .clk(cpu_clk),
-        
-        .if1_pc(if1_pc),                   // 发送地址给 BRAM
-        .if2_pc(if2_pc),                   // 校验 Tag
-        .if2_pred_taken(if2_pred_taken),   // 接收预测结果
+        .if1_pc(if1_pc),                   
+        .if2_pc(if2_pc),                   
+        .if2_pred_taken(if2_pred_taken),   
         .if2_pred_target(if2_pred_target),
         
         .ex_is_branch(ex_is_jump_or_branch),
@@ -214,10 +227,10 @@ module myCPU (
 
     // 传递预测状态 (IF2 -> ID)
     always_ff @(posedge cpu_clk) begin
-        if (cpu_rst) begin // 🌟 只保留全局复位
+        if (cpu_rst) begin 
             id_pred_taken  <= 1'b0;
             id_pred_target <= 32'b0;
-        end else if (flush_IF2_ID_net) begin // 🌟 把 flush 拆分到这里
+        end else if (flush_IF2_ID_net) begin 
             id_pred_taken  <= 1'b0;
             id_pred_target <= 32'b0;
         end else if (!stall_ID) begin
@@ -233,6 +246,9 @@ module myCPU (
     assign id_inst = id_valid ? id_inst_raw : 32'h00000013; 
 
     assign id_ret_pc = id_pc + 4; 
+
+    // 🌟 新增：在 ID 阶段解析 M 扩展指令
+    assign id_is_M = (id_inst[6:0] == 7'b0110011) && (id_inst[31:25] == 7'b0000001);
 
     Control control_inst (
         .inst      (id_inst), 
@@ -254,7 +270,6 @@ module myCPU (
         .id_rs1(id_inst[19:15]), .id_rs2(id_inst[24:20]),
         .ex_RegWen  (ex_RegWen),   .ex_rd  (ex_rd),
         .mem1_RegWen(mem1_RegWen), .mem1_rd(mem1_rd),
-        // 👇 恢复连回 MEM2 阶段的信号
         .mem2_RegWen(mem2_RegWen), .mem2_rd(mem2_rd),
         .id_forward_A(id_forward_A), .id_forward_B(id_forward_B)
     );
@@ -272,13 +287,17 @@ module myCPU (
         .id_csr_idx(id_inst[31:20]), .id_CsrWen(id_CsrWen), .id_CsrImmSel(id_CsrImmSel), 
         .id_IsEcall(id_IsEcall), .id_IsEbreak(id_IsEbreak), .id_IsMret(id_IsMret), .id_CsrOp(id_CsrOp),
         .id_forward_A(id_forward_A), .id_forward_B(id_forward_B),
-        .id_branch_target(id_branch_target), // 流水传递预计算地址
-        .id_valid(id_valid),   // 🌟 连入 ID 阶段的有效信号
+        .id_branch_target(id_branch_target), 
+        .id_valid(id_valid),
+        
+        .id_is_M(id_is_M),     // 🌟 新增连入 M 扩展标志
+        .ex_is_M(ex_is_M),     // 🌟 新增连出 M 扩展标志
+
         `ifdef NPC_TEST
-        .id_inst(id_inst),     // 🌟 连入 ID 阶段的机器码
-        .ex_inst(ex_inst),     // 🌟 连出到刚刚声明的 ex_inst
+        .id_inst(id_inst),     
+        .ex_inst(ex_inst),     
         `endif
-        .ex_valid(ex_valid),   // 🌟 连出到刚刚声明的 ex_valid
+        .ex_valid(ex_valid),   
         .ex_pc(ex_pc), .ex_rs1_data(ex_rs1_data), .ex_rs2_data(ex_rs2_data), .ex_imm(ex_imm), .ex_ret_pc(ex_ret_pc),
         .ex_rd(ex_rd), .ex_rs1(ex_rs1), .ex_rs2(ex_rs2),
         .ex_RegWen(ex_RegWen), .ex_MemWen(ex_MemWen), .ex_IsBranch(ex_IsBranch), .ex_AluSrcB(ex_AluSrcB),
@@ -310,15 +329,15 @@ module myCPU (
     always_comb begin
         case (ex_forward_A) 
             2'b11:   forwarded_rs1 = mem1_fw_data;
-            2'b10:   forwarded_rs1 = mem2_fw_data; // 🌟 使用通道 B：不含 BRAM 的纯组合逻辑线
-            2'b01:   forwarded_rs1 = wb_data;      // WB 阶段的 Load 数据在这里前递
+            2'b10:   forwarded_rs1 = mem2_fw_data; 
+            2'b01:   forwarded_rs1 = wb_data;
             default: forwarded_rs1 = ex_rs1_data;
         endcase
     end
     always_comb begin
         case (ex_forward_B) 
             2'b11:   forwarded_rs2 = mem1_fw_data;
-            2'b10:   forwarded_rs2 = mem2_fw_data; // 🌟 同上
+            2'b10:   forwarded_rs2 = mem2_fw_data; 
             2'b01:   forwarded_rs2 = wb_data;
             default: forwarded_rs2 = ex_rs2_data;
         endcase
@@ -339,33 +358,26 @@ module myCPU (
         .trap_pc(32'b0), 
         .Branch(ex_IsBranch), .Jump(ex_JmpType), .funct3(ex_funct3),
         .next_pc(ex_actual_target), .pc_plus_4(ex_pc_plus_4),
-        .actual_taken(ex_actual_taken) // 🌟 接收新信号，直接知道是否跳转
+        .actual_taken(ex_actual_taken) 
     );
 
-    // 🌟 极简优化：把 JALR 加法和多路选择器剥离开，让比较器提前并行计算！
     wire [31:0] fast_jalr_target = (forwarded_rs1 + ex_imm) & ~32'h1;
-    
-    // 直接在这里做并行判断，彻底绕开 BranchUnit 内部的 PC MUX 延迟
     wire target_mismatch = (ex_JmpType == 2'b10) ? (ex_pred_target != fast_jalr_target) : 
                            (ex_JmpType == 2'b11) ? (ex_pred_target != trap_pc) :
                                                    (ex_pred_target != ex_branch_target);
 
     wire branch_mispredict = ex_actual_taken ^ ex_pred_taken;
     wire target_mispredict = ex_actual_taken & ex_pred_taken & target_mismatch;
-    
-    // 🌟 优化：只有当 EX 阶段的指令真实有效时，才允许触发分支预测失败
+
     assign ex_mispredict = ex_valid & (
         (ex_is_jump_or_branch & (branch_mispredict | target_mispredict)) |
         (~ex_is_jump_or_branch & ex_pred_taken)
     );
 
-    // 决定回退地址：直接剥离 MUX！
-    // 因为 BranchUnit 中，如果分支不成立，ex_actual_target 原本就是 PC+4。
-    // 所以无需使用条件选择，直接连线即可，消灭 32位 MUX！
     assign recovery_pc = ex_actual_target;
 
     // ----------------------------------------
-    // 常规运算单元
+    // 常规运算单元与 MDU
     // ----------------------------------------
     assign ex_alu_op1 = (ex_AluSrcA == 2'b10) ? 32'b0 :
                         (ex_AluSrcA == 2'b01) ? ex_pc : forwarded_rs1;
@@ -375,6 +387,25 @@ module myCPU (
         .A(ex_alu_op1), .B(ex_alu_op2), .ALUControl(ex_alu_ctrl), .Result(ex_alu_res)
     );
 
+    // 🌟 新增：例化 MDU 及其控制逻辑
+    wire mdu_start = ex_valid & ex_is_M & ex_funct3[2] & ~mdu_busy & ~mdu_done;
+
+    MDU mdu_inst (
+        .clk(cpu_clk), 
+        .rst(cpu_rst),
+        .start(mdu_start), 
+        .funct3(ex_funct3),
+        .a(forwarded_rs1), 
+        .b(forwarded_rs2),
+        .result(mdu_res),
+        .busy(mdu_busy), 
+        .done(mdu_done)
+    );
+
+    // 🌟 新增：MUX 将 MDU 结果和 ALU 结果合并
+    logic [31:0] final_ex_alu_res;
+    assign final_ex_alu_res = ex_is_M ? mdu_res : ex_alu_res;
+
     AGU #(DATAWIDTH) agu_inst (
         .base   (forwarded_rs1), 
         .offset (ex_imm),
@@ -383,7 +414,7 @@ module myCPU (
 
     assign ex_csr_wdata = ex_CsrImmSel ? {27'b0, ex_rs1} : forwarded_rs1;
     assign ex_actual_csr_wen = ex_CsrWen && !((ex_CsrOp != 2'b00) && (ex_rs1 == 5'b0));
-    
+
     CSR #(DATAWIDTH) csr_inst (
         .clk(cpu_clk), .rst(cpu_rst), .pc(ex_pc),
         .csr_idx(ex_csr_idx), .wdata(ex_csr_wdata), .csr_op(ex_CsrOp), .csr_wen(ex_actual_csr_wen),
@@ -393,24 +424,27 @@ module myCPU (
 
     assign ex_take_trap = ex_IsEcall | ex_IsEbreak | ex_IsMret;
 
-    // 🌟 新增：在 EX 阶段就根据 WbSel 提前把前递数据算好！
+    // 🌟 修改：在写回选择网络中使用 final_ex_alu_res
     logic [31:0] ex_fw_data;
     assign ex_fw_data = (ex_WbSel == 2'b01) ? ex_ret_pc :
-                        (ex_WbSel == 2'b11) ? ex_csr_rdata : ex_alu_res;
+                        (ex_WbSel == 2'b11) ? ex_csr_rdata : final_ex_alu_res;
 
     EX_MEM1_Reg #(DATAWIDTH) ex_mem1_reg (
-        .clk(cpu_clk), .rst(cpu_rst), .flush(1'b0), .stall(1'b0),
-        .ex_alu_res(ex_alu_res), .ex_agu_res(ex_agu_res),      
+        .clk(cpu_clk), .rst(cpu_rst), 
+        .flush(flush_EX_MEM1_net),  // 🌟 修改：响应 MDU 的流水线气泡插入
+        .stall(1'b0),
+        .ex_alu_res(final_ex_alu_res), // 🌟 修改：传入含有乘除法结果的最终数据      
+        .ex_agu_res(ex_agu_res),      
         .ex_rs2_data(forwarded_rs2), .ex_ret_pc(ex_ret_pc),
         .ex_rd(ex_rd), .ex_RegWen(ex_RegWen), .ex_MemWen(ex_MemWen), .ex_WbSel(ex_WbSel), .ex_funct3(ex_funct3),
         .ex_csr_rdata(ex_csr_rdata),
-        .ex_fw_data(ex_fw_data),       // 🌟 连上计算好的输入
+        .ex_fw_data(ex_fw_data),       
         
         .mem1_alu_res(mem1_alu_res), .mem1_agu_res(mem1_agu_res),    
         .mem1_rs2_data(mem1_rs2_data), .mem1_ret_pc(mem1_ret_pc),
         .mem1_rd(mem1_rd), .mem1_RegWen(mem1_RegWen), .mem1_MemWen(mem1_MemWen), 
         .mem1_WbSel(mem1_WbSel), .mem1_funct3(mem1_funct3), .mem1_csr_rdata(mem1_csr_rdata),
-        .mem1_fw_data(mem1_fw_data)    // 🌟 连上输出
+        .mem1_fw_data(mem1_fw_data)    
     );
 
     // ==========================================
@@ -432,19 +466,17 @@ module myCPU (
         .clk(cpu_clk), .rst(cpu_rst), .flush(1'b0), .stall(1'b0),
         .mem1_alu_res(mem1_alu_res), .mem1_agu_res(mem1_agu_res), .mem1_ret_pc(mem1_ret_pc), .mem1_csr_rdata(mem1_csr_rdata),
         .mem1_rd(mem1_rd), .mem1_RegWen(mem1_RegWen), .mem1_WbSel(mem1_WbSel), .mem1_funct3(mem1_funct3),
-        .mem1_fw_data(mem1_fw_data),   // 🌟 连上输入
+        .mem1_fw_data(mem1_fw_data),   
         
         .mem2_alu_res(mem2_alu_res), .mem2_agu_res(mem2_agu_res), .mem2_ret_pc(mem2_ret_pc), .mem2_csr_rdata(mem2_csr_rdata),
         .mem2_rd(mem2_rd), .mem2_RegWen(mem2_RegWen), .mem2_WbSel(mem2_WbSel), .mem2_funct3(mem2_funct3),
-        .mem2_fw_data(mem2_fw_data)    // 🌟 连上输出
+        .mem2_fw_data(mem2_fw_data)    
     );
 
     // ==========================================
-    // Stage 6: MEM2 (Memory Read Process) 🌟 极大简化
+    // Stage 6: MEM2 (Memory Read Process)
     // ==========================================
     logic [31:0] mem2_non_load_data;
-    
-    // 通道 A：提前算好除了 Load 以外的写回数据 (避开关键路径)
     always_comb begin
         case (mem2_WbSel) 
             2'b01:   mem2_non_load_data = mem2_ret_pc;
@@ -453,18 +485,16 @@ module myCPU (
         endcase
     end
 
-    // 声明 WB 阶段的新增连线
     logic [31:0] wb_non_load_data, wb_perip_rdata;
     logic [1:0]  wb_agu_res_1_0;
     logic [2:0]  wb_funct3;
     logic [1:0]  wb_WbSel;
 
-    // 流水线寄存器：直接锁存最晚到达的 perip_rdata，切割违例路径！
     MEM2_WB_Reg #(DATAWIDTH) mem2_wb_reg (
         .clk(cpu_clk), .rst(cpu_rst), .flush(1'b0), .stall(1'b0),
         
         .mem2_non_load_data(mem2_non_load_data), 
-        .mem2_perip_rdata  (perip_rdata),       // 🌟 让 BRAM 数据一出 IP 就直接打入寄存器
+        .mem2_perip_rdata  (perip_rdata),       
         .mem2_agu_res_1_0  (mem2_agu_res[1:0]),
         .mem2_funct3       (mem2_funct3),
         .mem2_WbSel        (mem2_WbSel),
@@ -481,14 +511,12 @@ module myCPU (
     );
 
     // ==========================================
-    // Stage 7: WB (Write Back) 🌟 对齐逻辑移到这里
+    // Stage 7: WB (Write Back)
     // ==========================================
     logic [31:0] wb_rdata_ext;
-
-    // 因为 wb_perip_rdata 来自上方的本地 D 触发器，所以算这段逻辑速度极快
     always_comb begin
         case (wb_funct3)
-            3'b000: begin // LB : 字节选择 + 符号扩展
+            3'b000: begin // LB 
                 case(wb_agu_res_1_0)
                     2'b00: wb_rdata_ext = {{24{wb_perip_rdata[ 7]}}, wb_perip_rdata[ 7: 0]};
                     2'b01: wb_rdata_ext = {{24{wb_perip_rdata[15]}}, wb_perip_rdata[15: 8]};
@@ -496,7 +524,7 @@ module myCPU (
                     2'b11: wb_rdata_ext = {{24{wb_perip_rdata[31]}}, wb_perip_rdata[31:24]};
                 endcase
             end
-            3'b100: begin // LBU : 字节选择 + 零扩展
+            3'b100: begin // LBU 
                 case(wb_agu_res_1_0)
                     2'b00: wb_rdata_ext = {24'b0, wb_perip_rdata[ 7: 0]};
                     2'b01: wb_rdata_ext = {24'b0, wb_perip_rdata[15: 8]};
@@ -504,38 +532,32 @@ module myCPU (
                     2'b11: wb_rdata_ext = {24'b0, wb_perip_rdata[31:24]};
                 endcase
             end
-            3'b001: begin // LH : 半字选择 + 符号扩展
+            3'b001: begin // LH 
                 case(wb_agu_res_1_0[1])
                     1'b0: wb_rdata_ext = {{16{wb_perip_rdata[15]}}, wb_perip_rdata[15: 0]};
                     1'b1: wb_rdata_ext = {{16{wb_perip_rdata[31]}}, wb_perip_rdata[31:16]};
                 endcase
             end
-            3'b101: begin // LHU : 半字选择 + 零扩展
+            3'b101: begin // LHU 
                 case(wb_agu_res_1_0[1])
                     1'b0: wb_rdata_ext = {16'b0, wb_perip_rdata[15: 0]};
                     1'b1: wb_rdata_ext = {16'b0, wb_perip_rdata[31:16]};
                 endcase
             end
-            default: wb_rdata_ext = wb_perip_rdata; // LW : 整体透传
+            default: wb_rdata_ext = wb_perip_rdata; // LW
         endcase
     end
 
-    // 🌟 终极写回数据选择 (从 MEM2 阶段移交到了 WB 阶段)
     assign wb_data = (wb_WbSel == 2'b10) ? wb_rdata_ext : wb_non_load_data;
 
-    // 通用寄存器组 (Register File) 实例化
-    // 读端口由 ID 阶段的指令驱动
-    // 写端口由 WB 阶段的流水线寄存器驱动
     RF #(5, DATAWIDTH) rf_inst (
         .clk(cpu_clk), 
         .rst(cpu_rst), 
         
-        // 🌟 写端口 (属于 Stage 7: WB)
         .wen      (wb_RegWen), 
         .waddr    (wb_rd), 
-        .wdata    (wb_data),    // 从 MEM2_WB_Reg 直接流出的最终结果
+        .wdata    (wb_data),    
         
-        // 🌟 读端口 (属于 Stage 3: ID)
         .rR1      (id_inst[19:15]), 
         .rR2      (id_inst[24:20]), 
         .rR1_data (id_rs1_data), 
@@ -543,28 +565,139 @@ module myCPU (
     );
 
     `ifdef NPC_TEST
+    import "DPI-C" context function void set_csr_scope();
+
     // ==========================================
-    // 🌟 终极修复：DiffTest 指令提交同步逻辑
+    // 🌟 终极修复：DiffTest 指令提交与 CSR 影子同步
     // ==========================================
-    // 将 EX 阶段的 valid 和 pc 顺着流水线打 3 拍，同步到 WB 阶段
     logic        mem1_valid, mem2_valid, wb_valid;
     logic [31:0] mem1_pc,    mem2_pc,    wb_pc;
+
+    // --- 1. 计算 EX 阶段真正要写入 CSR 的值 ---
+    logic [31:0] ex_next_csr_val;
+    always_comb begin
+        case(ex_CsrOp)
+            2'b00: ex_next_csr_val = ex_csr_wdata; // RW
+            2'b01: ex_next_csr_val = ex_csr_rdata | ex_csr_wdata; // RS
+            2'b10: ex_next_csr_val = ex_csr_rdata & ~ex_csr_wdata; // RC
+            default: ex_next_csr_val = ex_csr_wdata;
+        endcase
+    end
+
+    // --- 2. 建立一条专供 DiffTest 的控制信号旁路流水线 ---
+    logic        mem1_csr_wen_diff, mem2_csr_wen_diff, wb_csr_wen_diff;
+    logic [11:0] mem1_csr_idx_diff, mem2_csr_idx_diff, wb_csr_idx_diff;
+    logic [31:0] mem1_csr_val_diff, mem2_csr_val_diff, wb_csr_val_diff;
+    logic        mem1_ecall_diff,   mem2_ecall_diff,   wb_ecall_diff;
+    logic        mem1_ebreak_diff,  mem2_ebreak_diff,  wb_ebreak_diff;
+    logic        mem1_mret_diff,    mem2_mret_diff,    wb_mret_diff;
 
     always_ff @(posedge cpu_clk) begin
         if (cpu_rst) begin
             mem1_valid <= 0; mem2_valid <= 0; wb_valid <= 0;
-            mem1_pc    <= 0; mem2_pc    <= 0; wb_pc    <= 0;
+            mem1_pc <= 0; mem2_pc <= 0; wb_pc <= 0;
+            
+            mem1_csr_wen_diff <= 0; mem2_csr_wen_diff <= 0; wb_csr_wen_diff <= 0;
+            mem1_ecall_diff <= 0;   mem2_ecall_diff <= 0;   wb_ecall_diff <= 0;
+            mem1_ebreak_diff <= 0;  mem2_ebreak_diff <= 0;  wb_ebreak_diff <= 0;
+            mem1_mret_diff <= 0;    mem2_mret_diff <= 0;    wb_mret_diff <= 0;
         end else begin
-            // 因为你的设计中 EX 之后没有 stall 和 flush，所以直接无脑打拍即可！
-            mem1_valid <= ex_valid;
-            mem1_pc    <= ex_pc;
+            // 🌟 EX -> MEM1 
+            if (flush_EX_MEM1_net) begin
+                mem1_valid <= 1'b0;
+                mem1_csr_wen_diff <= 0;
+                mem1_ecall_diff   <= 0;
+                mem1_ebreak_diff  <= 0;
+                mem1_mret_diff    <= 0;
+            end else begin
+                mem1_valid <= ex_valid;
+                // 只有 ex_valid 时，操作才算数！
+                mem1_csr_wen_diff <= ex_valid & ex_actual_csr_wen;
+                mem1_ecall_diff   <= ex_valid & ex_IsEcall;
+                mem1_ebreak_diff  <= ex_valid & ex_IsEbreak;
+                mem1_mret_diff    <= ex_valid & ex_IsMret;
+                
+                mem1_csr_idx_diff <= ex_csr_idx;
+                mem1_csr_val_diff <= ex_next_csr_val;
+            end
+            mem1_pc <= ex_pc;
 
+            // 🌟 MEM1 -> MEM2
             mem2_valid <= mem1_valid;
             mem2_pc    <= mem1_pc;
+            mem2_csr_wen_diff <= mem1_csr_wen_diff;
+            mem2_csr_idx_diff <= mem1_csr_idx_diff;
+            mem2_csr_val_diff <= mem1_csr_val_diff;
+            mem2_ecall_diff   <= mem1_ecall_diff;
+            mem2_ebreak_diff  <= mem1_ebreak_diff;
+            mem2_mret_diff    <= mem1_mret_diff;
 
-            wb_valid   <= mem2_valid;
-            wb_pc      <= mem2_pc;
+            // 🌟 MEM2 -> WB
+            wb_valid <= mem2_valid;
+            wb_pc    <= mem2_pc;
+            wb_csr_wen_diff   <= mem2_csr_wen_diff;
+            wb_csr_idx_diff   <= mem2_csr_idx_diff;
+            wb_csr_val_diff   <= mem2_csr_val_diff;
+            wb_ecall_diff     <= mem2_ecall_diff;
+            wb_ebreak_diff    <= mem2_ebreak_diff;
+            wb_mret_diff      <= mem2_mret_diff;
         end
+    end
+
+    // --- 3. DiffTest 专属影子 CSR 寄存器 (由 WB 更新) ---
+    logic [31:0] diff_mstatus = 32'h1800;
+    logic [31:0] diff_mtvec   = 32'h0;
+    logic [31:0] diff_mscratch= 32'h0;
+    logic [31:0] diff_mepc    = 32'h0;
+    logic [31:0] diff_mcause  = 32'h0;
+
+    always_ff @(posedge cpu_clk) begin
+        if (cpu_rst) begin
+            diff_mstatus <= 32'h1800;
+            diff_mtvec   <= 32'h0;
+            diff_mscratch <= 32'h0;
+            diff_mepc    <= 32'h0;
+            diff_mcause  <= 32'h0;
+        end else begin
+            // 完全复刻硬件的时序，但延迟到了真正的提交阶段
+            if (wb_ecall_diff) begin
+                diff_mepc    <= wb_pc; // 精准保存发生 ecall 的指令 PC
+                diff_mcause  <= 32'h0000_000B;
+                diff_mstatus <= {diff_mstatus[31:13], 2'b11, diff_mstatus[10:8], diff_mstatus[3], diff_mstatus[6:4], 1'b0, diff_mstatus[2:0]};
+            end else if (wb_ebreak_diff) begin
+                diff_mepc    <= wb_pc;
+                diff_mcause  <= 32'h0000_0003;
+                diff_mstatus <= {diff_mstatus[31:13], 2'b11, diff_mstatus[10:8], diff_mstatus[3], diff_mstatus[6:4], 1'b0, diff_mstatus[2:0]};
+            end else if (wb_mret_diff) begin
+                diff_mstatus <= {diff_mstatus[31:13], 2'b00, diff_mstatus[10:8], 1'b1, diff_mstatus[6:4], diff_mstatus[7], diff_mstatus[2:0]};
+            end else if (wb_csr_wen_diff) begin
+                case(wb_csr_idx_diff)
+                    12'h300: diff_mstatus <= wb_csr_val_diff;
+                    12'h305: diff_mtvec   <= wb_csr_val_diff;
+                    12'h340: diff_mscratch <= wb_csr_val_diff;
+                    12'h341: diff_mepc    <= wb_csr_val_diff;
+                    12'h342: diff_mcause  <= wb_csr_val_diff;
+                    default: ;
+                endcase
+            end
+        end
+    end
+
+    // --- 4. 导出给 C++ 的接口 ---
+    export "DPI-C" function get_csr;
+    function int get_csr(input int idx);
+        case(idx)
+            32'h300: return diff_mstatus;
+            32'h305: return diff_mtvec;
+            32'h340: return diff_mscratch;
+            32'h341: return diff_mepc;
+            32'h342: return diff_mcause;
+            default: return 0;
+        endcase
+    endfunction
+
+    initial begin
+        set_csr_scope();
     end
     `endif
 

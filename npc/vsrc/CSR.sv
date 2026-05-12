@@ -1,5 +1,6 @@
 `timescale 1ns / 1ps
 
+
 module CSR #(
     parameter DATAWIDTH = 32
 )(
@@ -23,6 +24,8 @@ module CSR #(
     logic [31:0] mepc    = 32'h0;
     logic [31:0] mcause  = 32'h0;
     logic [31:0] mscratch= 32'h0;  // 🌟 新增 mscratch
+
+    
 
     // ==========================================
     // 1. 读出 CSR 的老数据 (异步纯组合逻辑)
@@ -78,7 +81,7 @@ module CSR #(
             // 优先级 3: mret 退出异常处理
             else if (mret) begin
                 // 恢复中断使能和特权级
-                mstatus <= {mstatus[31:13], 2'b11, mstatus[10:8], 1'b1, mstatus[6:4], mstatus[7], mstatus[2:0]};
+                mstatus <= {mstatus[31:13], 2'b00, mstatus[10:8], 1'b1, mstatus[6:4], mstatus[7], mstatus[2:0]};
             end
             // 优先级 4: 普通的软件 CSR 读写指令
             else if (csr_wen) begin
