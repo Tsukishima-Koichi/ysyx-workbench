@@ -455,8 +455,9 @@ module myCPU (
     ALU #(DATAWIDTH) alu_inst (.A(ex1_alu_op1), .B(ex1_alu_op2), .ALUControl(ex1_alu_ctrl), .Result(ex1_alu_res));
     
     logic [31:0] mdu_res; logic mdu_busy, mdu_done;
-    logic mdu_start = ex1_valid & ex1_is_M & ~mdu_busy & ~mdu_done;
-    assign stall_req_mdu = ex1_valid & ex1_is_M & ~mdu_done;
+    logic mdu_start;
+    always_comb mdu_start = ex1_valid && ex1_is_M && !mdu_busy && !mdu_done;
+    always_comb stall_req_mdu = ex1_valid && ex1_is_M && !mdu_done;
     
     MDU mdu_inst (
         .clk(cpu_clk), .rst(cpu_rst), .start(mdu_start), 

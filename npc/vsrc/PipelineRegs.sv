@@ -185,9 +185,15 @@ module RF_EX1_Reg #(parameter DATAWIDTH = 32)(
             {ex1_RegWen, ex1_MemWen, ex1_IsBranch, ex1_AluSrcB} <= {rf_RegWen, rf_MemWen, rf_IsBranch, rf_AluSrcB};
             {ex1_JmpType, ex1_WbSel, ex1_AluSrcA} <= {rf_JmpType, rf_WbSel, rf_AluSrcA};
             {ex1_alu_ctrl, ex1_funct3, ex1_is_M} <= {rf_alu_ctrl, rf_funct3, rf_is_M};
-            {ex1_csr_idx, ex1_CsrWen, ex1_CsrImmSel, ex1_IsEcall, ex1_IsEbreak, ex1_IsMret, ex1_CsrOp} <= 
+            {ex1_csr_idx, ex1_CsrWen, ex1_CsrImmSel, ex1_IsEcall, ex1_IsEbreak, ex1_IsMret, ex1_CsrOp} <=
             {rf_csr_idx, rf_CsrWen, rf_CsrImmSel, rf_IsEcall, rf_IsEbreak, rf_IsMret, rf_CsrOp};
             {ex1_pred_taken, ex1_pred_target} <= {rf_pred_taken, rf_pred_target};
+        end
+        // 注毒时彻底切断幽灵控制信号，防止 HDU 误判 / MDU 误启动
+        if (poison) begin
+            ex1_is_M   <= 1'b0;
+            ex1_RegWen <= 1'b0;
+            ex1_MemWen <= 1'b0;
         end
     end
 endmodule

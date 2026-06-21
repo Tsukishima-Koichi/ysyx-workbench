@@ -35,18 +35,19 @@ module HazardDetectionUnit(
 
     always_comb begin
         is_load_use = 1'b0;
-        // EX1 stage
-        if (ex_WbSel == 2'b10 && ex_rd != 5'd0) begin
+        // EX1 stage — must check RegWen (which includes valid) to prevent
+        // poisoned/ghost instructions from triggering false load-use hazards
+        if (ex_RegWen && ex_WbSel == 2'b10 && ex_rd != 5'd0) begin
             if ((rs1_read && ex_rd == id_rs1) || (rs2_read && ex_rd == id_rs2))
                 is_load_use = 1'b1;
         end
-        // BR stage
-        if (mem1_WbSel == 2'b10 && mem1_rd != 5'd0) begin
+        // BR stage (mem1 in HD naming)
+        if (mem1_RegWen && mem1_WbSel == 2'b10 && mem1_rd != 5'd0) begin
             if ((rs1_read && mem1_rd == id_rs1) || (rs2_read && mem1_rd == id_rs2))
                 is_load_use = 1'b1;
         end
         // MEM1 stage (actual memory stage) -- loaded data not ready yet
-        if (ls_WbSel == 2'b10 && ls_rd != 5'd0) begin
+        if (ls_RegWen && ls_WbSel == 2'b10 && ls_rd != 5'd0) begin
             if ((rs1_read && ls_rd == id_rs1) || (rs2_read && ls_rd == id_rs2))
                 is_load_use = 1'b1;
         end
