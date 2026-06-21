@@ -21,7 +21,9 @@ module myCPU (
     output logic         perip_wen,     // 存储器写使能信号，高电平执行物理写入
     output logic [ 3:0]  perip_mask,    // 字节选择掩码 (Byte Mask)，对应单字、半字、字节对齐
     output logic [31:0]  perip_wdata,   // 待写入存储器的数据物理总线
-    input  wire  [31:0]  perip_rdata    // 从存储器/外设返回的单字读取数据总线
+    input  wire  [31:0]  perip_rdata,   // 从存储器/外设返回的单字读取数据总线
+    output logic         br_valid_out,   // BR stage valid (for dead_loop gating)
+    output logic [31:0]  br_target_out   // BR stage branch target
 );
 
     // --- 架构核心参数定义 (Micro-architectural Parameters) ---
@@ -500,6 +502,9 @@ module myCPU (
     // 分支比对信号已在前端 F1 阶段预先声明，此处直接赋值
     assign br_is_jump_or_branch = br_IsBranch || (br_JmpType != 2'b00);
 
+    assign br_valid_out  = br_valid;
+    assign br_target_out = br_branch_target;
+
     // 🌟 修正项：已移除悬空的 pc_plus_4 端口
     BranchUnit #(DATAWIDTH) bu_inst (
         .imm(32'b0), .rs1_data(br_fw_rs1_data), .rs2_data(br_fw_rs2_data),
@@ -534,7 +539,7 @@ module myCPU (
 
     logic [31:0] br_csr_wdata;
     assign br_csr_wdata = br_CsrImmSel ? {27'b0, br_inst[19:15]} : br_fw_rs1_data;
-    logic br_actual_csr_wen = br_valid && br_CsrWen && !((br_CsrOp != 2'b00) && (br_inst[19:15] == 5'b0));
+    wire  br_actual_csr_wen = br_valid && br_CsrWen && !((br_CsrOp != 2'b00) && (br_inst[19:15] == 5'b0));
     assign br_take_trap = br_valid & (br_IsEcall | br_IsEbreak | br_IsMret);
 
     CSR #(DATAWIDTH) csr_inst (

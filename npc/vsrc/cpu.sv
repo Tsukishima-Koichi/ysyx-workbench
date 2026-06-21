@@ -36,8 +36,12 @@ module cpu(
         .perip_wen    (perip_wen),
         .perip_mask   (perip_mask),
         .perip_wdata  (perip_wdata),
-        .perip_rdata  (perip_rdata)
+        .perip_rdata  (perip_rdata),
+        .br_valid_out (br_valid_out),
+        .br_target_out(br_target_out)
     );
+    logic br_valid_out;
+    logic [31:0] br_target_out;
 
     logic [31:0] irom_addr_reg;
     logic [31:0] perip_addr_reg;
@@ -67,27 +71,19 @@ module cpu(
     assign inst     = u_myCPU.id_inst;     
     assign halt_req = u_myCPU.ex1_IsEbreak;
     
-    // Require dead_loop_raw to persist 2 cycles. This prevents false positives
-    // when a JAL in the same 64-bit fetch pair is at BR while the paired
-    // dead-loop instruction (j .) briefly appears at EX1 before being flushed.
-    logic dead_loop_raw;
-    logic dead_loop_r;
-    assign dead_loop_raw = u_myCPU.ex1_valid &&
-                           (u_myCPU.ex1_JmpType == 2'b01) &&
-                           (u_myCPU.ex1_branch_target == u_myCPU.ex1_pc);
-    logic [31:0] halt_pc_r;
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            dead_loop_r <= 1'b0;
-            halt_pc_r   <= 32'b0;
-        end else begin
-            dead_loop_r <= dead_loop_raw;
-            halt_pc_r   <= u_myCPU.ex1_pc;
-        end
-    end
-    // Fire only when raw signal persists for TWO cycles (after flush would have settled)
-    assign dead_loop = dead_loop_raw && dead_loop_r;
-    assign halt_pc   = halt_pc_r;
+    // dead_loop: J-type self-loop at EX1.  Gate with BR stage to prevent
+    // false positives when the paired instruction in the same 64-bit fetch
+    // (e.g. jal at pc_0) is at BR and about to redirect the PC away.
+    // If BR has a valid branch targeting a *different* address, the EX1
+    // instruction will be flushed — suppress dead_loop.
+    wire br_will_redirect_away = u_myCPU.br_valid_out &&
+         (u_myCPU.br_target_out != u_myCPU.ex1_pc) &&
+         (u_myCPU.br_target_out != 32'h0);  // BTB miss gives target=0
+    assign dead_loop = u_myCPU.ex1_valid &&
+                       (u_myCPU.ex1_JmpType == 2'b01) &&
+                       (u_myCPU.ex1_branch_target == u_myCPU.ex1_pc) &&
+                       ~br_will_redirect_away;
+    assign halt_pc = u_myCPU.ex1_pc;
 
     assign commit_valid = u_myCPU.wb_valid;
     assign commit_pc    = u_myCPU.wb_pc;

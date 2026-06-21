@@ -11,7 +11,6 @@ module PC#(
 );
     logic [DATAWIDTH - 1:0] reg_pc;
 
-    // 彻底删除 rst_delay，精准响应复位
     always_ff @(posedge clk) begin
         if (rst) reg_pc <= RESET_VAL;
         else     reg_pc <= npc;

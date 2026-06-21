@@ -6,7 +6,7 @@ include $(AM_HOME)/scripts/platform/npc.mk
 CFLAGS  += -DISA_H=\"riscv/riscv.h\"
 
 # 3. 核心：重写编译参数
-COMMON_CFLAGS += -march=rv32i_zicsr -mabi=ilp32   # overwrite
+COMMON_CFLAGS += -march=rv32im_zicsr -mabi=ilp32   # overwrite
 
 # 4. 重写链接参数：指定输出 32 位的 ELF 文件
 LDFLAGS       += -melf32lriscv                    # overwrite
