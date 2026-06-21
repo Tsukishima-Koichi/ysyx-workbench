@@ -59,19 +59,35 @@ module cpu(
     end
 
     always_ff @(posedge clk) begin
-        if (!rst && perip_wen) begin
+        if (!rst && perip_wen)
             pmem_write(perip_addr, perip_wdata, {4'b0, perip_mask});
-        end
     end
     
     assign pc       = u_myCPU.ex1_pc;
     assign inst     = u_myCPU.id_inst;     
     assign halt_req = u_myCPU.ex1_IsEbreak;
     
-    assign dead_loop = u_myCPU.ex1_valid && 
-                       (u_myCPU.ex1_JmpType == 2'b01) && 
-                       (u_myCPU.ex1_branch_target == u_myCPU.ex1_pc);
-    assign halt_pc   = u_myCPU.ex1_pc;
+    // Require dead_loop_raw to persist 2 cycles. This prevents false positives
+    // when a JAL in the same 64-bit fetch pair is at BR while the paired
+    // dead-loop instruction (j .) briefly appears at EX1 before being flushed.
+    logic dead_loop_raw;
+    logic dead_loop_r;
+    assign dead_loop_raw = u_myCPU.ex1_valid &&
+                           (u_myCPU.ex1_JmpType == 2'b01) &&
+                           (u_myCPU.ex1_branch_target == u_myCPU.ex1_pc);
+    logic [31:0] halt_pc_r;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            dead_loop_r <= 1'b0;
+            halt_pc_r   <= 32'b0;
+        end else begin
+            dead_loop_r <= dead_loop_raw;
+            halt_pc_r   <= u_myCPU.ex1_pc;
+        end
+    end
+    // Fire only when raw signal persists for TWO cycles (after flush would have settled)
+    assign dead_loop = dead_loop_raw && dead_loop_r;
+    assign halt_pc   = halt_pc_r;
 
     assign commit_valid = u_myCPU.wb_valid;
     assign commit_pc    = u_myCPU.wb_pc;

@@ -224,7 +224,11 @@ module myCPU (
     wire f2_is_ctrl_0 = (f2_opcode_0 == 7'b1100011) | (f2_opcode_0 == 7'b1101111) | (f2_opcode_0 == 7'b1100111);
     wire f2_is_ctrl_1 = (f2_opcode_1 == 7'b1100011) | (f2_opcode_1 == 7'b1101111) | (f2_opcode_1 == 7'b1100111);
 
-    // 3. 拦截过滤：只有在真正是控制流指令的前提下，才允许采信 TAGE/BHT 的 Taken 预测
+    // 预译码：无条件跳转 (JAL, JALR) 用于阻断同拍第二条指令推入 IQ
+    wire f2_is_uncond_0 = (f2_opcode_0 == 7'b1101111) | (f2_opcode_0 == 7'b1100111);
+    wire f2_is_uncond_1 = (f2_opcode_1 == 7'b1101111) | (f2_opcode_1 == 7'b1100111);
+
+    // 3. 拦截过滤：只有在真正是控制流指令的前提下，才允许采信 BHT 的 Taken 预测
     wire real_f2_pred_taken_0 = f2_pred_taken_0 & f2_is_ctrl_0;
     wire real_f2_pred_taken_1 = f2_pred_taken_1 & f2_is_ctrl_1;
 
@@ -284,8 +288,10 @@ module myCPU (
         .push_pc_0(f5_pc_0), .push_inst_0(f5_inst_0), 
         .push_pred_taken_0(f5_pred_taken_0), .push_pred_target_0(f5_pred_tgt_0),
         
-        // Push 端口 1 (若第一条指令发生跳转，则第二条指令处于被覆盖的阴影区，强制使其无效)
-        .push_valid_1(f5_valid & ~f5_pred_taken_0), 
+        // Push 端口 1：若第一条指令为无条件跳转 (JAL/JALR)，即使 BHT 未命中
+        // 也阻断第二条指令推入，防止死循环指令进入流水线触发假阳性 dead_loop
+        .push_valid_1(f5_valid & ~f5_pred_taken_0 &
+                      ~((f5_inst_0[6:0] == 7'b1101111) | (f5_inst_0[6:0] == 7'b1100111))),
         .push_pc_1(f5_pc_1), .push_inst_1(f5_inst_1), 
         .push_pred_taken_1(f5_pred_taken_1), .push_pred_target_1(f5_pred_tgt_1),
         

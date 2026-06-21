@@ -72,21 +72,26 @@ int main(int argc, char** argv) {
         }
 
         if (top->dead_loop) {
-            printf("\n\n[Halt] Program finished and entered infinite loop at PC=0x80000010 after %u cycles!\n", cycles);
+            printf("\n\n[Halt] Program finished and entered infinite loop at PC=0x%08x after %u cycles!\n", top->halt_pc, cycles);
             
             // ==========================================
             //  Memory Dump
             // ==========================================
             uint32_t addr1 = 0x80200020;
             uint32_t addr2 = 0x80200040;
-            
-            // 计算地址在物理内存数组 pmem 中的相对偏移量，并强制转换为 32 位指针进行读取
+            uint32_t addr_pass = 0x80100000;
+            uint32_t addr_fail = 0x80100004;
+
             uint32_t val1 = *(uint32_t*)(pmem + (addr1 - PMEM_BASE));
             uint32_t val2 = *(uint32_t*)(pmem + (addr2 - PMEM_BASE));
-            
+            uint32_t val_pass = *(uint32_t*)(pmem + (addr_pass - PMEM_BASE));
+            uint32_t val_fail = *(uint32_t*)(pmem + (addr_fail - PMEM_BASE));
+
             printf("\n========== Memory Dump ==========\n");
-            printf("Mem[0x%08x] = 0x%08x\n", addr1, val1);
-            printf("Mem[0x%08x] = 0x%08x\n", addr2, val2);
+            printf("Mem[0x%08x] = 0x%08x (checksum1)\n", addr1, val1);
+            printf("Mem[0x%08x] = 0x%08x (checksum2)\n", addr2, val2);
+            printf("Mem[0x%08x] = 0x%08x (pass_count)\n", addr_pass, val_pass);
+            printf("Mem[0x%08x] = 0x%08x (fail_count)\n", addr_fail, val_fail);
             printf("=================================\n\n");
             
             break; 
