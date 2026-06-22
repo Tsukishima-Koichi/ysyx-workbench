@@ -30,7 +30,8 @@ module TAGE #(
     input  logic        update_valid,
     input  logic [31:0] update_pc,
     input  logic        update_taken,
-    input  logic        update_is_branch,
+    input  logic        update_is_branch,   // table training gate (all branches/jumps)
+    input  logic        update_ghr,         // GHR update (conditional branches only)
 
     // === GHR 全局历史寄存器 (可观测) ===
     output logic [GHR_WIDTH-1:0] ghr
@@ -45,7 +46,7 @@ module TAGE #(
     always_ff @(posedge clk) begin
         if (rst)
             ghr <= '0;
-        else if (update_valid && update_is_branch)
+        else if (update_valid && update_ghr)
             ghr <= {ghr[GHR_WIDTH-2:0], update_taken};
     end
 

@@ -212,7 +212,8 @@ module myCPU (
         .update_valid(br_valid),
         .update_pc(br_pc),
         .update_taken(br_actual_taken),
-        .update_is_branch(br_is_jump_or_branch),
+        .update_is_branch(br_is_jump_or_branch),  // tables: all branches/jumps
+        .update_ghr(br_IsBranch),                 // GHR: conditional branches only
         .ghr(tage_ghr_unused)
     );
 
@@ -317,11 +318,10 @@ module myCPU (
         .f5_nlp_hit(f5_nlp_hit), .f5_nlp_target(f5_nlp_target)
     );
     
-    // NLP-aware 微冲刷 (TAGE 后台训练中，暂由 BHT 提供方向)
-    // TODO: 激活 TAGE — wire f5_pc0_taken = f5_pred_taken_0 ?
-    //         (tage_f5_has_provider ? tage_f5_pred_taken : 1'b1) :
-    //         (tage_f5_has_provider && tage_f5_pred_taken && f5_pred_tgt_0 != 0);
-    wire f5_pc0_taken = f5_pred_taken_0;
+    // TAGE/NLP-aware 微冲刷 — TAGE 保守模式：仅可否决 BHT taken，不新增
+    // 当 BHT 预测 taken 但 TAGE 有更强历史上下文认为 not-taken → 否决
+    wire f5_pc0_taken = f5_pred_taken_0 &&
+        !(tage_f5_has_provider && !tage_f5_pred_taken);  // TAGE 否决 BHT taken
     wire f5_any_taken = f5_pc0_taken | f5_pred_taken_1;
 
     assign f5_micro_target = f5_pc0_taken    ? f5_pred_tgt_0 :
