@@ -24,10 +24,10 @@ module BranchPredictor #(
     wire [INDEX_BITS-1:0]         ex_idx = ex_pc[INDEX_BITS+1 : 2];
     wire [PC_WIDTH-INDEX_BITS-3:0] ex_tag = ex_pc[PC_WIDTH-1 : INDEX_BITS+2];
 
-    logic [PC_WIDTH-INDEX_BITS-3:0] btb_tag    [TABLE_SIZE-1:0];
-    logic [PC_WIDTH-1:0]            btb_target [TABLE_SIZE-1:0];
-    logic                           btb_valid  [TABLE_SIZE-1:0];
-    logic [1:0]                     bht_counter [TABLE_SIZE-1:0];
+    (* ram_style = "block" *) logic [PC_WIDTH-INDEX_BITS-3:0] btb_tag    [TABLE_SIZE-1:0];
+    (* ram_style = "block" *) logic [PC_WIDTH-1:0]            btb_target [TABLE_SIZE-1:0];
+    (* ram_style = "block" *) logic                           btb_valid  [TABLE_SIZE-1:0];
+    (* ram_style = "block" *) logic [1:0]                     bht_counter [TABLE_SIZE-1:0];
 
     logic [PC_WIDTH-INDEX_BITS-3:0] read_tag;
     logic [PC_WIDTH-1:0]            read_target;

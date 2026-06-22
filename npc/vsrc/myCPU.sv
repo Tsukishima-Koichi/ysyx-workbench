@@ -45,21 +45,23 @@ module myCPU (
     logic stall_IQ_pop;                 // 指令队列出队（Pop）阻断信号
 
     // 控制流异常与冲刷 (Flush) 全局广播网
-    logic f5_micro_flush;               // F5 级局部微冲刷，用于纠正 TAGE 预测覆盖的气泡
-    logic br_flush;                     // 后端物理真实分支决断触发的全局致命冲刷
+    // 高扇出约束: 强制 EDA 工具复制寄存器，以空间换时序收敛
+    (* max_fanout = "16" *) logic f5_micro_flush;   // F5→F1-F4 微冲刷广播
+    (* max_fanout = "16" *) logic br_flush;          // BR→全流水线致命冲刷广播
     logic br_take_trap;                 // 异常中断/环境调用 (Trap/Ecall/Mret) 状态跳转使能
     logic br_mispredict;                // BR 级确认为真实分支预测失败 (Branch Misprediction)
     logic hd_flush_RF_EX1;              // 因 加载-使用冒险 (Load-Use Hazard) 注入物理气泡的冲刷控制线
 
     // 分布式同步注毒网络 (Distributed Synchronization Poison Network)
     // 信号不接入触发器异步端，通过使能端与有效位（Valid Bit）强行改写为 1'b0 实现拦截
-    logic poison_F1_F4;                 // 覆盖 F1 至 F4 取指级的同步毒药信号
-    logic poison_F5;                    // 覆盖 F5 取指决策级的同步毒药信号
-    logic poison_IQ;                    // 重置指令队列读写指针的同步毒药信号
-    logic poison_ID;                    // 覆盖 ID 译码级的同步毒药信号
-    logic poison_RF;                    // 覆盖 RF 寄存器读取级的同步毒药信号
-    logic poison_EX1;                   // 覆盖 EX1 执行级的同步毒药信号
-    logic poison_BR;                    // 覆盖 BR 分支决断级的同步毒药信号
+    // equivalent_register_removal=no: 防止综合器将注毒寄存器合并优化掉
+    (* equivalent_register_removal = "no" *) logic poison_F1_F4;
+    (* equivalent_register_removal = "no" *) logic poison_F5;
+    (* equivalent_register_removal = "no" *) logic poison_IQ;
+    (* equivalent_register_removal = "no" *) logic poison_ID;
+    (* equivalent_register_removal = "no" *) logic poison_RF;
+    (* equivalent_register_removal = "no" *) logic poison_EX1;
+    (* equivalent_register_removal = "no" *) logic poison_BR;
 
     // NLP (Next-Line Predictor) 信号
     logic        nlp_hit;
@@ -203,7 +205,7 @@ module myCPU (
     // TAGE 方向预测器 — 4 表几何历史长度，F2→F3→F4→F5 内部流水线
     // 在高频下提供高精度方向预测，在 F5 覆盖 BHT 的预测结果
     wire [31:0] tage_ghr_unused;
-    TAGE #(4, 8, 8, 32) tage_inst (
+    TAGE #(.NUM_TABLES(4), .INDEX_BITS(10), .TAG_BITS(8), .GHR_WIDTH(32)) tage_inst (
         .clk(cpu_clk), .rst(cpu_rst),
         .f2_pc(f2_pc_0),
         .f5_pred_taken(tage_f5_pred_taken),
@@ -318,13 +320,11 @@ module myCPU (
         .f5_nlp_hit(f5_nlp_hit), .f5_nlp_target(f5_nlp_target)
     );
     
-    // TAGE/NLP-aware 微冲刷
-    // TAGE 否决: BHT taken → TAGE 可取消；TAGE 增加: 仅 T2/T3 且有 BTB 目标
-    wire f5_tage_strong = (tage_f5_provider_idx >= 2'd2);
-    wire f5_btb_has_tgt = (f5_pred_tgt_0 != 32'd0);
+    // TAGE/NLP-aware 微冲刷 — TAGE(10-bit) 与 BTB(10-bit) 索引已对齐
+    // TAGE 可自由否决或新增 taken 预测，无需 BTB 目标门控
     wire f5_pc0_taken = f5_pred_taken_0 ?
-        (tage_f5_has_provider ? tage_f5_pred_taken : 1'b1) :
-        (tage_f5_has_provider && tage_f5_pred_taken && f5_tage_strong && f5_btb_has_tgt);
+        (tage_f5_has_provider ? tage_f5_pred_taken : 1'b1) :              // BHT taken: TAGE validates
+        (tage_f5_has_provider && tage_f5_pred_taken);                     // TAGE adds freely
     wire f5_any_taken = f5_pc0_taken | f5_pred_taken_1;
 
     assign f5_micro_target = f5_pc0_taken    ? f5_pred_tgt_0 :
