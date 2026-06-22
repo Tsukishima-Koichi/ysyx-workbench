@@ -318,10 +318,13 @@ module myCPU (
         .f5_nlp_hit(f5_nlp_hit), .f5_nlp_target(f5_nlp_target)
     );
     
-    // TAGE/NLP-aware 微冲刷 — TAGE 保守模式：仅可否决 BHT taken，不新增
-    // 当 BHT 预测 taken 但 TAGE 有更强历史上下文认为 not-taken → 否决
-    wire f5_pc0_taken = f5_pred_taken_0 &&
-        !(tage_f5_has_provider && !tage_f5_pred_taken);  // TAGE 否决 BHT taken
+    // TAGE/NLP-aware 微冲刷
+    // TAGE 否决: BHT taken → TAGE 可取消；TAGE 增加: 仅 T2/T3 且有 BTB 目标
+    wire f5_tage_strong = (tage_f5_provider_idx >= 2'd2);
+    wire f5_btb_has_tgt = (f5_pred_tgt_0 != 32'd0);
+    wire f5_pc0_taken = f5_pred_taken_0 ?
+        (tage_f5_has_provider ? tage_f5_pred_taken : 1'b1) :
+        (tage_f5_has_provider && tage_f5_pred_taken && f5_tage_strong && f5_btb_has_tgt);
     wire f5_any_taken = f5_pc0_taken | f5_pred_taken_1;
 
     assign f5_micro_target = f5_pc0_taken    ? f5_pred_tgt_0 :
