@@ -36,6 +36,8 @@ module BranchPredictor #(
 
     initial begin
         for (int i = 0; i < TABLE_SIZE; i++) begin
+            btb_tag[i]     = '0;
+            btb_target[i]  = '0;
             btb_valid[i]   = 1'b0;
             bht_counter[i] = 2'b00;
         end
@@ -51,7 +53,7 @@ module BranchPredictor #(
 
     wire tag_match = (read_valid === 1'b1) && (read_tag === if2_tag);
     assign if2_pred_taken  = tag_match && (read_bht[1] === 1'b1);
-    assign if2_pred_target = read_target;
+    assign if2_pred_target = tag_match ? read_target : '0;
 
     always_ff @(posedge clk) begin
         if (ex_is_branch) begin

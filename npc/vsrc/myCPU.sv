@@ -61,6 +61,22 @@ module myCPU (
     logic poison_EX1;                   // 覆盖 EX1 执行级的同步毒药信号
     logic poison_BR;                    // 覆盖 BR 分支决断级的同步毒药信号
 
+    // NLP (Next-Line Predictor) 信号
+    logic        nlp_hit;
+    logic [31:0] nlp_target;
+
+    // TAGE 方向预测器信号
+    logic        tage_f5_pred_taken;
+    logic        tage_f5_has_provider;
+    logic [1:0]  tage_f5_provider_idx;
+
+    // NLP 流水线通道 (F1→F2→[bypass]→F4→F5)
+    logic        f2_nlp_hit, f4_nlp_hit, f5_nlp_hit;
+    logic [31:0] f2_nlp_target, f4_nlp_target, f5_nlp_target;
+
+    // F5 聚合预测结果 (TAGE/BHT → 微冲刷目标)
+    logic [31:0] f5_micro_target;
+
     // =========================================================================
     // 物理控制流拦截网络映射逻辑 (Control Pipeline Routing Logic)
     // =========================================================================
@@ -95,20 +111,31 @@ module myCPU (
     assign f1_pc_1 = f1_pc_0 + 4;       // 双字对齐的次路取指地址生成
     assign irom_addr = f1_pc_0;         // 绑定 I-ROM 物理驱动总线
 
-    // 🌟 核心控制流多路选择决策链 (PC Selector Priority Tree)
-    // 优先级严格限制：异常陷阱响应 (Trap) > 后端真实控制流纠正 (BR Mispredict) > 前端 TAGE 覆盖微冲刷 > 顺序 +8 推进
+    // 🌟 PC 选择器 (NLP 快径 + TAGE/NLP-aware 微冲刷)
     assign actual_next_pc = br_take_trap   ? trap_pc :
                             br_mispredict  ? br_actual_target :
-                            f5_micro_flush ? (f5_pred_taken_0 ? f5_pred_tgt_0 : f5_pred_tgt_1) :
+                            f5_micro_flush ? f5_micro_target :
                             stall_frontend ? f1_pc_0 :
+                            nlp_hit        ? nlp_target :
                                              (f1_pc_0 + 8);
 
     // 程序计数器 (Program Counter) 物理寄存器例化
     PC #(DATAWIDTH, RESET_VAL) pc_inst (
-        .clk(cpu_clk), 
+        .clk(cpu_clk),
         .rst(cpu_rst),
-        .npc(actual_next_pc), 
+        .npc(actual_next_pc),
         .pc_out(f1_pc_0)
+    );
+
+    // NLP (Next-Line Predictor) — F1 级 0-cycle LUTRAM 快径预测器
+    // 8-bit tag 消除索引碰撞，训练端口绑定到 BR 级
+    NLP #(.INDEX_BITS(8), .TAG_BITS(8), .DATAWIDTH(DATAWIDTH)) nlp_inst (
+        .clk(cpu_clk), .rst(cpu_rst),
+        .f1_pc(f1_pc_0),
+        .nlp_target(nlp_target), .nlp_hit(nlp_hit),
+        // 学习所有真实分支/跳转 (排除 trap: ECALL/EBREAK/MRET)
+        .update_valid(br_valid & (br_IsBranch | (br_JmpType == 2'b01) | (br_JmpType == 2'b10)) & br_actual_taken),
+        .update_pc(br_pc), .update_target(br_actual_target)
     );
 
     // F1 -> F2 级流水线时序寄存器屏障例化
@@ -125,11 +152,15 @@ module myCPU (
         .f1_pc_1(f1_pc_1),
         .f1_inst_0(f1_inst_0),
         .f1_inst_1(f1_inst_1),
+        .f1_nlp_hit(nlp_hit),
+        .f1_nlp_target(nlp_target),
         .f2_pc_0(f2_pc_0),
         .f2_pc_1(f2_pc_1),
         .f2_inst_0(f2_inst_0),
         .f2_inst_1(f2_inst_1),
-        .f2_valid(f2_valid)
+        .f2_valid(f2_valid),
+        .f2_nlp_hit(f2_nlp_hit),
+        .f2_nlp_target(f2_nlp_target)
     );
     
     // 拆分 64-bit I-ROM 物理总线至非对称的双向单字通道
@@ -163,10 +194,26 @@ module myCPU (
         .if2_pc(f2_pc_1),
         .if2_pred_taken(f2_pred_taken_1), 
         .if2_pred_target(f2_pred_tgt_1),
-        .ex_is_branch(1'b0), 
-        .ex_pc(32'b0), 
-        .ex_actual_taken(1'b0), 
+        .ex_is_branch(1'b0),
+        .ex_pc(32'b0),
+        .ex_actual_taken(1'b0),
         .ex_actual_target(32'b0)
+    );
+
+    // TAGE 方向预测器 — 4 表几何历史长度，F2→F3→F4→F5 内部流水线
+    // 在高频下提供高精度方向预测，在 F5 覆盖 BHT 的预测结果
+    wire [31:0] tage_ghr_unused;
+    TAGE #(4, 8, 8, 32) tage_inst (
+        .clk(cpu_clk), .rst(cpu_rst),
+        .f2_pc(f2_pc_0),
+        .f5_pred_taken(tage_f5_pred_taken),
+        .f5_has_provider(tage_f5_has_provider),
+        .f5_provider_idx(tage_f5_provider_idx),
+        .update_valid(br_valid),
+        .update_pc(br_pc),
+        .update_taken(br_actual_taken),
+        .update_is_branch(br_is_jump_or_branch),
+        .ghr(tage_ghr_unused)
     );
 
     // =========================================================================
@@ -240,6 +287,8 @@ module myCPU (
     // 4. 将过滤后的纯净预测信号旁路至 F4 级
     assign {f4_pred_taken_0, f4_pred_tgt_0} = f3_valid ? {real_f2_pred_taken_0, f2_pred_tgt_0} : 33'b0;
     assign {f4_pred_taken_1, f4_pred_tgt_1} = f3_valid ? {real_f2_pred_taken_1, f2_pred_tgt_1} : 33'b0;
+    // NLP 同样以 bypass 方式从 F2 旁路至 F4 (与 BTB 预测保持时序对齐)
+    assign {f4_nlp_hit, f4_nlp_target} = f3_valid ? {f2_nlp_hit, f2_nlp_target} : {1'b0, 32'b0};
 
     // =========================================================================
     // Stage 5: F5 级 (微冲刷决策与非对称缓冲注入)
@@ -251,23 +300,37 @@ module myCPU (
     logic [31:0] f5_pred_tgt_0, f5_pred_tgt_1;
     
     F4_F5_Reg #(DATAWIDTH) f4_f5_reg (
-        .clk(cpu_clk), 
-        .rst(cpu_rst), 
-        .stall(stall_frontend), 
+        .clk(cpu_clk),
+        .rst(cpu_rst),
+        .stall(stall_frontend),
         .poison(poison_F5),
-        .f4_valid(f4_valid), 
+        .f4_valid(f4_valid),
         .f4_pc_0(f4_pc_0), .f4_pc_1(f4_pc_1), .f4_inst_0(f4_inst_0), .f4_inst_1(f4_inst_1),
-        .f4_pred_taken_0(f4_pred_taken_0), .f4_pred_taken_1(f4_pred_taken_1), 
+        .f4_pred_taken_0(f4_pred_taken_0), .f4_pred_taken_1(f4_pred_taken_1),
         .f4_pred_tgt_0(f4_pred_tgt_0), .f4_pred_tgt_1(f4_pred_tgt_1),
-        
-        .f5_valid(f5_valid), 
+        .f4_nlp_hit(f4_nlp_hit), .f4_nlp_target(f4_nlp_target),
+
+        .f5_valid(f5_valid),
         .f5_pc_0(f5_pc_0), .f5_pc_1(f5_pc_1), .f5_inst_0(f5_inst_0), .f5_inst_1(f5_inst_1),
-        .f5_pred_taken_0(f5_pred_taken_0), .f5_pred_taken_1(f5_pred_taken_1), 
-        .f5_pred_tgt_0(f5_pred_tgt_0), .f5_pred_tgt_1(f5_pred_tgt_1)
+        .f5_pred_taken_0(f5_pred_taken_0), .f5_pred_taken_1(f5_pred_taken_1),
+        .f5_pred_tgt_0(f5_pred_tgt_0), .f5_pred_tgt_1(f5_pred_tgt_1),
+        .f5_nlp_hit(f5_nlp_hit), .f5_nlp_target(f5_nlp_target)
     );
     
-    // 生成局部微冲刷信号：只要双字中任意一条指令预测为 Taken，即触发 F1-F4 的推测状态废弃
-    assign f5_micro_flush = f5_valid & (f5_pred_taken_0 | f5_pred_taken_1);
+    // NLP-aware 微冲刷 (TAGE 后台训练中，暂由 BHT 提供方向)
+    // TODO: 激活 TAGE — wire f5_pc0_taken = f5_pred_taken_0 ?
+    //         (tage_f5_has_provider ? tage_f5_pred_taken : 1'b1) :
+    //         (tage_f5_has_provider && tage_f5_pred_taken && f5_pred_tgt_0 != 0);
+    wire f5_pc0_taken = f5_pred_taken_0;
+    wire f5_any_taken = f5_pc0_taken | f5_pred_taken_1;
+
+    assign f5_micro_target = f5_pc0_taken    ? f5_pred_tgt_0 :
+                             f5_pred_taken_1 ? f5_pred_tgt_1 :
+                                               (f5_pc_0 + 32'd8);
+    assign f5_micro_flush = f5_valid & (
+        ( f5_nlp_hit & ~f5_any_taken) |          // NLP over-predict → undo
+        (~f5_nlp_hit &  f5_any_taken)             // NLP missed → correct
+    );
 
     // =========================================================================
     // D-Block: 解耦中端 (非对称环形队列与译码器)
@@ -286,13 +349,14 @@ module myCPU (
         .flush(poison_IQ), // 接入最高优先级的后端真实异常重置网络
         
         // Push 端口 0 (第一条指令无条件尝试推入)
-        .push_valid_0(f5_valid), 
-        .push_pc_0(f5_pc_0), .push_inst_0(f5_inst_0), 
+        // 门控 ~stall_frontend：前端停顿时 F5 保持旧数据 valid，禁止重复推送
+        .push_valid_0(f5_valid & ~stall_frontend),
+        .push_pc_0(f5_pc_0), .push_inst_0(f5_inst_0),
         .push_pred_taken_0(f5_pred_taken_0), .push_pred_target_0(f5_pred_tgt_0),
-        
+
         // Push 端口 1：若第一条指令为无条件跳转 (JAL/JALR)，即使 BHT 未命中
         // 也阻断第二条指令推入，防止死循环指令进入流水线触发假阳性 dead_loop
-        .push_valid_1(f5_valid & ~f5_pred_taken_0 &
+        .push_valid_1(f5_valid & ~stall_frontend & ~f5_pred_taken_0 &
                       ~((f5_inst_0[6:0] == 7'b1101111) | (f5_inst_0[6:0] == 7'b1100111))),
         .push_pc_1(f5_pc_1), .push_inst_1(f5_inst_1), 
         .push_pred_taken_1(f5_pred_taken_1), .push_pred_target_1(f5_pred_tgt_1),
@@ -313,10 +377,10 @@ module myCPU (
     assign id_valid = id_valid_raw & ~poison_ID;
     assign id_inst  = id_valid ? id_inst_raw : 32'h00000013; 
     
-    logic [31:0] id_ret_pc = id_pc + 4; // 提前计算返回地址，切断 BranchUnit 到 ID 的时序长径
-    
+    wire [31:0] id_ret_pc = id_pc + 4; // 提前计算返回地址，切断 BranchUnit 到 ID 的时序长径
+
     // 乘除法扩展 (M-Extension) 预解码标识
-    logic id_is_M = (id_inst[6:0] == 7'b0110011) && (id_inst[31:25] == 7'b0000001);
+    wire id_is_M = (id_inst[6:0] == 7'b0110011) && (id_inst[31:25] == 7'b0000001);
 
     // =========================================================================
     // 控制流译码器 (Control & Decoder Modules)

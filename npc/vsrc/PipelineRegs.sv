@@ -9,9 +9,13 @@ module F1_F2_Reg #(parameter DATAWIDTH = 32)(
     input  logic clk, rst, stall, poison,
     input  logic [DATAWIDTH-1:0] f1_pc_0, f1_pc_1,
     input  logic [DATAWIDTH-1:0] f1_inst_0, f1_inst_1,
+    input  logic                 f1_nlp_hit,
+    input  logic [DATAWIDTH-1:0] f1_nlp_target,
     output logic [DATAWIDTH-1:0] f2_pc_0, f2_pc_1,
     output logic [DATAWIDTH-1:0] f2_inst_0, f2_inst_1,
-    output logic                 f2_valid
+    output logic                 f2_valid,
+    output logic                 f2_nlp_hit,
+    output logic [DATAWIDTH-1:0] f2_nlp_target
 );
     always_ff @(posedge clk) begin
         if (rst || poison) f2_valid <= 1'b0;
@@ -19,10 +23,12 @@ module F1_F2_Reg #(parameter DATAWIDTH = 32)(
     end
     always_ff @(posedge clk) begin
         if (!stall) begin
-            f2_pc_0   <= f1_pc_0;
-            f2_pc_1   <= f1_pc_1;
-            f2_inst_0 <= f1_inst_0;
-            f2_inst_1 <= f1_inst_1;
+            f2_pc_0      <= f1_pc_0;
+            f2_pc_1      <= f1_pc_1;
+            f2_inst_0    <= f1_inst_0;
+            f2_inst_1    <= f1_inst_1;
+            f2_nlp_hit   <= f1_nlp_hit;
+            f2_nlp_target <= f1_nlp_target;
         end
     end
 endmodule
@@ -73,11 +79,15 @@ module F4_F5_Reg #(parameter DATAWIDTH = 32)(
     input  logic [DATAWIDTH-1:0] f4_pc_0, f4_pc_1, f4_inst_0, f4_inst_1,
     input  logic                 f4_pred_taken_0, f4_pred_taken_1,
     input  logic [DATAWIDTH-1:0] f4_pred_tgt_0, f4_pred_tgt_1,
-    
+    input  logic                 f4_nlp_hit,
+    input  logic [DATAWIDTH-1:0] f4_nlp_target,
+
     output logic                 f5_valid,
     output logic [DATAWIDTH-1:0] f5_pc_0, f5_pc_1, f5_inst_0, f5_inst_1,
     output logic                 f5_pred_taken_0, f5_pred_taken_1,
-    output logic [DATAWIDTH-1:0] f5_pred_tgt_0, f5_pred_tgt_1
+    output logic [DATAWIDTH-1:0] f5_pred_tgt_0, f5_pred_tgt_1,
+    output logic                 f5_nlp_hit,
+    output logic [DATAWIDTH-1:0] f5_nlp_target
 );
     always_ff @(posedge clk) begin
         if (rst || poison) f5_valid <= 1'b0;
@@ -89,6 +99,8 @@ module F4_F5_Reg #(parameter DATAWIDTH = 32)(
             {f5_inst_0, f5_inst_1} <= {f4_inst_0, f4_inst_1};
             {f5_pred_taken_0, f5_pred_taken_1} <= {f4_pred_taken_0, f4_pred_taken_1};
             {f5_pred_tgt_0, f5_pred_tgt_1}     <= {f4_pred_tgt_0, f4_pred_tgt_1};
+            f5_nlp_hit   <= f4_nlp_hit;
+            f5_nlp_target <= f4_nlp_target;
         end
     end
 endmodule
