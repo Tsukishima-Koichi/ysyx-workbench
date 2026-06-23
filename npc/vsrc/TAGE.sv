@@ -170,35 +170,70 @@ module TAGE #(
     end
 
     // =========================================================================
-    // BR 级训练更新 (2-cycle read-modify-write pipeline)
-    // Cycle 1: latch update info + issue BRAM read
-    // Cycle 2: always_comb computes new values, always_ff writes back
+    // BR 级训练更新 (3-cycle read-modify-write + 1-entry backup queue)
+    //
+    // S0 (upd_pending): 锁存更新信息，下一拍发起 BRAM 读
+    // S1 (upd_compute): BRAM 数据就绪，组合逻辑计算新值，写回
+    // Q  (upd_q_valid): 当 S0 忙碌时缓存新更新，S0 空闲时自动载入
     // =========================================================================
 
-    // 锁存更新信息
+    // --- S0: 锁存更新信息 ---
     logic                    upd_pending;
-    logic [31:0]             upd_pc_r;
-    logic                    upd_taken_r;
     logic [TAG_BITS-1:0]     upd_tag_r;
+    logic                    upd_taken_r;
     logic [INDEX_BITS-1:0]   upd_idx_r [NUM_TABLES-1:0];
 
+    // --- S1: BRAM 读结果 + 计算使能 ---
+    logic                    upd_compute;
+    logic [TAG_BITS+4:0]     upd_read [NUM_TABLES-1:0];
+
+    // --- 备份队列: 当 S0 忙碌时吸纳新更新 ---
+    logic                    upd_q_valid;
+    logic [TAG_BITS-1:0]     upd_q_tag;
+    logic                    upd_q_taken;
+    logic [INDEX_BITS-1:0]   upd_q_idx [NUM_TABLES-1:0];
+
+    // 统一的训练流水线状态机 (单 always_ff 避免 NBA 竞争)
     always_ff @(posedge clk) begin
         if (rst) begin
             upd_pending <= 1'b0;
-        end else if (update_valid && update_is_branch && !upd_pending) begin
-            upd_pending <= 1'b1;
-            upd_pc_r    <= update_pc;
-            upd_taken_r <= update_taken;
-            upd_tag_r   <= update_pc[INDEX_BITS+TAG_BITS+1 : INDEX_BITS+2];
-            for (int t = 0; t < NUM_TABLES; t++)
-                upd_idx_r[t] <= hash_idx(update_pc, ghr, 6'(HIST_LEN[t]));
-        end else if (!update_valid || !update_is_branch) begin
-            upd_pending <= 1'b0;
+            upd_q_valid <= 1'b0;
+        end else begin
+            // === 处理新到达的更新 ===
+            if (update_valid && update_is_branch) begin
+                if (!upd_pending) begin
+                    // S0 空闲 → 直接捕获
+                    upd_pending <= 1'b1;
+                    upd_tag_r   <= update_pc[INDEX_BITS+TAG_BITS+1 : INDEX_BITS+2];
+                    upd_taken_r <= update_taken;
+                    for (int t = 0; t < NUM_TABLES; t++)
+                        upd_idx_r[t] <= hash_idx(update_pc, ghr, 6'(HIST_LEN[t]));
+                end else if (!upd_q_valid) begin
+                    // S0 忙碌，队列空闲 → 入队
+                    upd_q_valid <= 1'b1;
+                    upd_q_tag   <= update_pc[INDEX_BITS+TAG_BITS+1 : INDEX_BITS+2];
+                    upd_q_taken <= update_taken;
+                    for (int t = 0; t < NUM_TABLES; t++)
+                        upd_q_idx[t] <= hash_idx(update_pc, ghr, 6'(HIST_LEN[t]));
+                end
+                // else: S0 忙 + Q 忙 → 丢弃 (极端罕见)
+            end
+
+            // === S1 完成时释放 S0，若 Q 有数据则自动载入 ===
+            if (upd_compute) begin
+                upd_pending <= upd_q_valid;
+                if (upd_q_valid) begin
+                    upd_tag_r   <= upd_q_tag;
+                    upd_taken_r <= upd_q_taken;
+                    for (int t = 0; t < NUM_TABLES; t++)
+                        upd_idx_r[t] <= upd_q_idx[t];
+                    upd_q_valid <= 1'b0;
+                end
+            end
         end
     end
 
-    // BRAM 读 (Cycle 1 → Cycle 2)
-    logic [TAG_BITS+4:0] upd_read [NUM_TABLES-1:0];
+    // S0 → S1: BRAM 读
     always_ff @(posedge clk) begin
         if (upd_pending) begin
             upd_read[0] <= table0_mem[upd_idx_r[0]];
@@ -208,22 +243,19 @@ module TAGE #(
         end
     end
 
-    // 组合逻辑计算新值 (Cycle 2)
-    logic [TAG_BITS-1:0] new_tag [NUM_TABLES-1:0];
-    logic [2:0]          new_ctr [NUM_TABLES-1:0];
-    logic [1:0]          new_u   [NUM_TABLES-1:0];
-    logic                upd_we;
-    logic [1:0]          upd_prov_comb;
-
-    // 标记 upd_pending 是否已读完并进行计算
-    logic upd_compute;
+    // S0 → S1 使能延迟
     always_ff @(posedge clk) begin
         upd_compute <= upd_pending;
     end
 
+    // 组合逻辑计算新值 (S1 阶段)
+    logic [TAG_BITS-1:0] new_tag [NUM_TABLES-1:0];
+    logic [2:0]          new_ctr [NUM_TABLES-1:0];
+    logic [1:0]          new_u   [NUM_TABLES-1:0];
+    logic [1:0]          upd_prov_comb;
+
     always_comb begin
         // Default: keep old values
-        upd_we = 1'b0;
         upd_prov_comb = 2'b00;
         for (int t = 0; t < NUM_TABLES; t++) begin
             new_tag[t] = upd_read[t][TAG_BITS+4:5];
@@ -247,7 +279,7 @@ module TAGE #(
                 new_ctr[upd_prov_comb] = new_ctr[upd_prov_comb] - 1;
 
             // usefulness
-            if ((upd_read[upd_prov_comb][4:2][2] == 1'b1) == upd_taken_r) begin
+            if (upd_read[upd_prov_comb][4] == upd_taken_r) begin
                 if (new_u[upd_prov_comb] < 2'b11)
                     new_u[upd_prov_comb] = new_u[upd_prov_comb] + 1;
             end else begin
@@ -266,12 +298,10 @@ module TAGE #(
                         new_u[t] = new_u[t] - 1;
                 end
             end
-
-            upd_we = 1'b1;
         end
     end
 
-    // BRAM 写回 (Cycle 2)
+    // BRAM 写回 (S1 阶段)
     always_ff @(posedge clk) begin
         if (upd_compute) begin
             table0_mem[upd_idx_r[0]] <= {new_tag[0], new_ctr[0], new_u[0]};
@@ -287,6 +317,7 @@ module TAGE #(
     initial begin
         for (int i = 0; i < TABLE_SIZE; i++) begin
             table0_mem[i] = '0;
+            table0_mem[i][4:2] = 3'b011;  // T0 bimodal: weakly-taken bias
             table1_mem[i] = '0;
             table2_mem[i] = '0;
             table3_mem[i] = '0;

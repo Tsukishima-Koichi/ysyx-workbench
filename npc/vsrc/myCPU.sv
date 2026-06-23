@@ -321,10 +321,12 @@ module myCPU (
     );
     
     // TAGE/NLP-aware 微冲刷 — TAGE(10-bit) 与 BTB(10-bit) 索引已对齐
-    // TAGE 可自由否决或新增 taken 预测，无需 BTB 目标门控
+    // TAGE 的 "add" 能力需要门控: 只有 BTB 命中 (有有效目标) 时才允许 TAGE 新增 taken 预测
+    // 否则 T0 aliasing 导致非分支指令被误判为 taken，微冲刷重定向到垃圾地址 (如 0x0)
+    wire tage_add_taken = tage_f5_has_provider && tage_f5_pred_taken && (f5_pred_tgt_0 != '0);
     wire f5_pc0_taken = f5_pred_taken_0 ?
         (tage_f5_has_provider ? tage_f5_pred_taken : 1'b1) :              // BHT taken: TAGE validates
-        (tage_f5_has_provider && tage_f5_pred_taken);                     // TAGE adds freely
+        tage_add_taken;                                                    // TAGE adds with BTB gate
     wire f5_any_taken = f5_pc0_taken | f5_pred_taken_1;
 
     assign f5_micro_target = f5_pc0_taken    ? f5_pred_tgt_0 :
