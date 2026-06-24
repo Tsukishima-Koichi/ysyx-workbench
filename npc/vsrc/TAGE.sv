@@ -170,144 +170,187 @@ module TAGE #(
     end
 
     // =========================================================================
-    // BR 级训练更新 (3-cycle read-modify-write + 1-entry backup queue)
+    // BR 级训练更新 (split combinational path across 2 cycles)
     //
-    // S0 (upd_pending): 锁存更新信息，下一拍发起 BRAM 读
-    // S1 (upd_compute): BRAM 数据就绪，组合逻辑计算新值，写回
-    // Q  (upd_q_valid): 当 S0 忙碌时缓存新更新，S0 空闲时自动载入
+    // Pipeline: S0 (capture+BRAM read) → S1 (provider+counter) → S2 (usefulness+
+    //            allocation+decay+writeback). 3 cycles total, same latency as
+    //            original, but each combinational cloud is smaller → higher fMAX.
+    //
+    // Q (upd_q_valid): 1-entry backup queue when pipeline is busy.
     // =========================================================================
 
-    // --- S0: 锁存更新信息 ---
+    // --- S0: 锁存更新信息，发起 BRAM 读 ---
     logic                    upd_pending;
-    logic [TAG_BITS-1:0]     upd_tag_r;
-    logic                    upd_taken_r;
-    logic [INDEX_BITS-1:0]   upd_idx_r [NUM_TABLES-1:0];
+    logic [TAG_BITS-1:0]     s0_tag;
+    logic                    s0_taken;
+    logic [INDEX_BITS-1:0]   s0_idx [NUM_TABLES-1:0];
 
-    // --- S1: BRAM 读结果 + 计算使能 ---
-    logic                    upd_compute;
-    logic [TAG_BITS+4:0]     upd_read [NUM_TABLES-1:0];
+    // --- S1: BRAM 读结果 + 第一级计算 (provider, counter, pred_correct) ---
+    logic                    upd_s1_valid;
+    logic [TAG_BITS-1:0]     s1_tag;
+    logic                    s1_taken;
+    logic [INDEX_BITS-1:0]   s1_idx [NUM_TABLES-1:0];
+    logic [TAG_BITS+4:0]     s1_read [NUM_TABLES-1:0];
+    logic [1:0]              s1_provider;
+    logic [2:0]              s1_new_ctr [NUM_TABLES-1:0];
+    logic                    s1_pred_correct;
 
-    // --- 备份队列: 当 S0 忙碌时吸纳新更新 ---
+    // --- S2: 第二级计算 (usefulness, allocation, decay) + BRAM 写回 ---
+    logic                    upd_s2_valid;
+    logic [INDEX_BITS-1:0]   s2_idx [NUM_TABLES-1:0];
+    logic [TAG_BITS+4:0]     s2_read [NUM_TABLES-1:0];
+    logic [1:0]              s2_provider;
+    logic [2:0]              s2_ctr   [NUM_TABLES-1:0];
+    logic                    s2_pred_correct;
+    logic [TAG_BITS-1:0]     s2_tag;
+    logic                    s2_taken;
+
+    // --- 备份队列 ---
     logic                    upd_q_valid;
     logic [TAG_BITS-1:0]     upd_q_tag;
     logic                    upd_q_taken;
     logic [INDEX_BITS-1:0]   upd_q_idx [NUM_TABLES-1:0];
 
-    // 统一的训练流水线状态机 (单 always_ff 避免 NBA 竞争)
+    // 训练流水线状态机
     always_ff @(posedge clk) begin
         if (rst) begin
-            upd_pending <= 1'b0;
-            upd_q_valid <= 1'b0;
+            upd_pending  <= 1'b0;
+            upd_s1_valid <= 1'b0;
+            upd_s2_valid <= 1'b0;
+            upd_q_valid  <= 1'b0;
         end else begin
-            // === 处理新到达的更新 ===
+            // 流水线自动推进
+            upd_s1_valid <= upd_pending;
+            upd_s2_valid <= upd_s1_valid;
+
+            // 处理新到达的更新
             if (update_valid && update_is_branch) begin
                 if (!upd_pending) begin
-                    // S0 空闲 → 直接捕获
                     upd_pending <= 1'b1;
-                    upd_tag_r   <= update_pc[INDEX_BITS+TAG_BITS+1 : INDEX_BITS+2];
-                    upd_taken_r <= update_taken;
+                    s0_tag      <= update_pc[INDEX_BITS+TAG_BITS+1 : INDEX_BITS+2];
+                    s0_taken    <= update_taken;
                     for (int t = 0; t < NUM_TABLES; t++)
-                        upd_idx_r[t] <= hash_idx(update_pc, ghr, 6'(HIST_LEN[t]));
+                        s0_idx[t] <= hash_idx(update_pc, ghr, 6'(HIST_LEN[t]));
                 end else if (!upd_q_valid) begin
-                    // S0 忙碌，队列空闲 → 入队
                     upd_q_valid <= 1'b1;
                     upd_q_tag   <= update_pc[INDEX_BITS+TAG_BITS+1 : INDEX_BITS+2];
                     upd_q_taken <= update_taken;
                     for (int t = 0; t < NUM_TABLES; t++)
                         upd_q_idx[t] <= hash_idx(update_pc, ghr, 6'(HIST_LEN[t]));
                 end
-                // else: S0 忙 + Q 忙 → 丢弃 (极端罕见)
             end
 
-            // === S1 完成时释放 S0，若 Q 有数据则自动载入 ===
-            if (upd_compute) begin
+            // S1 完成时释放 S0，若 Q 有数据则自动载入
+            if (upd_s1_valid) begin
                 upd_pending <= upd_q_valid;
                 if (upd_q_valid) begin
-                    upd_tag_r   <= upd_q_tag;
-                    upd_taken_r <= upd_q_taken;
+                    s0_tag      <= upd_q_tag;
+                    s0_taken    <= upd_q_taken;
                     for (int t = 0; t < NUM_TABLES; t++)
-                        upd_idx_r[t] <= upd_q_idx[t];
+                        s0_idx[t] <= upd_q_idx[t];
                     upd_q_valid <= 1'b0;
                 end
             end
+
+            // S1→S2 数据转移
+            if (upd_s1_valid) begin
+                for (int t = 0; t < NUM_TABLES; t++) begin
+                    s2_idx[t]  <= s1_idx[t];
+                    s2_read[t] <= s1_read[t];
+                end
+                s2_provider     <= s1_provider;
+                s2_ctr          <= s1_new_ctr;
+                s2_pred_correct <= s1_pred_correct;
+                s2_tag          <= s1_tag;
+                s2_taken        <= s1_taken;
+            end
         end
     end
 
-    // S0 → S1: BRAM 读
+    // S0 → S1: BRAM 读 + 索引/标记转移
     always_ff @(posedge clk) begin
         if (upd_pending) begin
-            upd_read[0] <= table0_mem[upd_idx_r[0]];
-            upd_read[1] <= table1_mem[upd_idx_r[1]];
-            upd_read[2] <= table2_mem[upd_idx_r[2]];
-            upd_read[3] <= table3_mem[upd_idx_r[3]];
+            s1_read[0] <= table0_mem[s0_idx[0]];
+            s1_read[1] <= table1_mem[s0_idx[1]];
+            s1_read[2] <= table2_mem[s0_idx[2]];
+            s1_read[3] <= table3_mem[s0_idx[3]];
+            for (int t = 0; t < NUM_TABLES; t++)
+                s1_idx[t] <= s0_idx[t];
+            s1_tag   <= s0_tag;
+            s1_taken <= s0_taken;
         end
     end
 
-    // S0 → S1 使能延迟
-    always_ff @(posedge clk) begin
-        upd_compute <= upd_pending;
-    end
-
-    // 组合逻辑计算新值 (S1 阶段)
-    logic [TAG_BITS-1:0] new_tag [NUM_TABLES-1:0];
-    logic [2:0]          new_ctr [NUM_TABLES-1:0];
-    logic [1:0]          new_u   [NUM_TABLES-1:0];
-    logic [1:0]          upd_prov_comb;
-
+    // =========================================================================
+    // S1 组合逻辑: provider 搜索 + 计数器更新 + 预测正确性
+    // =========================================================================
     always_comb begin
-        // Default: keep old values
-        upd_prov_comb = 2'b00;
-        for (int t = 0; t < NUM_TABLES; t++) begin
-            new_tag[t] = upd_read[t][TAG_BITS+4:5];
-            new_ctr[t] = upd_read[t][4:2];
-            new_u[t]   = upd_read[t][1:0];
-        end
+        s1_provider     = 2'b00;
+        s1_pred_correct = 1'b0;
+        for (int t = 0; t < NUM_TABLES; t++)
+            s1_new_ctr[t] = s1_read[t][4:2];
 
-        if (upd_compute) begin
-            // 找提供者
+        if (upd_s1_valid) begin
             for (int t = NUM_TABLES-1; t >= 0; t--) begin
-                if (t == 0 || (upd_read[t][TAG_BITS+4:5] == upd_tag_r)) begin
-                    upd_prov_comb = t[1:0];
+                if (t == 0 || (s1_read[t][TAG_BITS+4:5] == s1_tag)) begin
+                    s1_provider = t[1:0];
                     break;
                 end
             end
 
-            // 更新计数器
-            if (upd_taken_r && new_ctr[upd_prov_comb] < 3'b111)
-                new_ctr[upd_prov_comb] = new_ctr[upd_prov_comb] + 1;
-            else if (!upd_taken_r && new_ctr[upd_prov_comb] > 3'b000)
-                new_ctr[upd_prov_comb] = new_ctr[upd_prov_comb] - 1;
+            if (s1_taken && s1_new_ctr[s1_provider] < 3'b111)
+                s1_new_ctr[s1_provider] = s1_new_ctr[s1_provider] + 1;
+            else if (!s1_taken && s1_new_ctr[s1_provider] > 3'b000)
+                s1_new_ctr[s1_provider] = s1_new_ctr[s1_provider] - 1;
 
-            // usefulness
-            if (upd_read[upd_prov_comb][4] == upd_taken_r) begin
-                if (new_u[upd_prov_comb] < 2'b11)
-                    new_u[upd_prov_comb] = new_u[upd_prov_comb] + 1;
+            s1_pred_correct = (s1_read[s1_provider][4] == s1_taken);
+        end
+    end
+
+    // =========================================================================
+    // S2 组合逻辑: usefulness + allocation + decay
+    // =========================================================================
+    logic [TAG_BITS-1:0] s2_new_tag [NUM_TABLES-1:0];
+    logic [2:0]          s2_new_ctr [NUM_TABLES-1:0];
+    logic [1:0]          s2_new_u   [NUM_TABLES-1:0];
+
+    always_comb begin
+        for (int t = 0; t < NUM_TABLES; t++) begin
+            s2_new_tag[t] = s2_read[t][TAG_BITS+4:5];
+            s2_new_ctr[t] = s2_ctr[t];
+            s2_new_u[t]   = s2_read[t][1:0];
+        end
+
+        if (upd_s2_valid) begin
+            if (s2_pred_correct) begin
+                if (s2_new_u[s2_provider] < 2'b11)
+                    s2_new_u[s2_provider] = s2_new_u[s2_provider] + 1;
             end else begin
-                // 分配
-                for (int t = int'(upd_prov_comb) + 1; t < NUM_TABLES; t++) begin
-                    if ((t != 0 && upd_read[t][TAG_BITS+4:5] != upd_tag_r) && upd_read[t][1:0] == 2'b00) begin
-                        new_tag[t] = upd_tag_r;
-                        new_ctr[t] = upd_taken_r ? 3'b100 : 3'b011;
-                        new_u[t]   = 2'b00;
+                for (int t = 0; t < NUM_TABLES; t++) begin
+                    if (t > s2_provider && (t != 0 && s2_read[t][TAG_BITS+4:5] != s2_tag) && s2_read[t][1:0] == 2'b00) begin
+                        s2_new_tag[t] = s2_tag;
+                        s2_new_ctr[t] = s2_taken ? 3'b100 : 3'b011;
+                        s2_new_u[t]   = 2'b00;
                         break;
                     end
                 end
-                // 衰减
                 for (int t = 0; t < NUM_TABLES; t++) begin
-                    if (t != int'(upd_prov_comb) && new_u[t] > 2'b00)
-                        new_u[t] = new_u[t] - 1;
+                    if (t != int'(s2_provider) && s2_new_u[t] > 2'b00)
+                        s2_new_u[t] = s2_new_u[t] - 1;
                 end
             end
         end
     end
 
-    // BRAM 写回 (S1 阶段)
+    // =========================================================================
+    // S2: BRAM 写回
+    // =========================================================================
     always_ff @(posedge clk) begin
-        if (upd_compute) begin
-            table0_mem[upd_idx_r[0]] <= {new_tag[0], new_ctr[0], new_u[0]};
-            table1_mem[upd_idx_r[1]] <= {new_tag[1], new_ctr[1], new_u[1]};
-            table2_mem[upd_idx_r[2]] <= {new_tag[2], new_ctr[2], new_u[2]};
-            table3_mem[upd_idx_r[3]] <= {new_tag[3], new_ctr[3], new_u[3]};
+        if (upd_s2_valid) begin
+            table0_mem[s2_idx[0]] <= {s2_new_tag[0], s2_new_ctr[0], s2_new_u[0]};
+            table1_mem[s2_idx[1]] <= {s2_new_tag[1], s2_new_ctr[1], s2_new_u[1]};
+            table2_mem[s2_idx[2]] <= {s2_new_tag[2], s2_new_ctr[2], s2_new_u[2]};
+            table3_mem[s2_idx[3]] <= {s2_new_tag[3], s2_new_ctr[3], s2_new_u[3]};
         end
     end
 
