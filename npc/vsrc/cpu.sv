@@ -15,8 +15,11 @@ module cpu(
     output logic        dead_loop,
     output logic [31:0] halt_pc,     
 
-    output logic        commit_valid, 
-    output logic [31:0] commit_pc
+    output logic        commit_valid,
+    output logic [31:0] commit_pc,
+    // 双发射第二条指令提交
+    output logic        commit_valid_1,
+    output logic [31:0] commit_pc_1
 );
     logic [31:0] irom_addr;
     logic [63:0] irom_data; // 升级为 64-bit 双字数据总线
@@ -85,6 +88,9 @@ module cpu(
                        ~br_will_redirect_away;
     assign halt_pc = u_myCPU.ex1_pc;
 
-    assign commit_valid = u_myCPU.wb_valid;
-    assign commit_pc    = u_myCPU.wb_pc;
+    assign commit_valid   = u_myCPU.wb_valid;
+    assign commit_pc      = u_myCPU.wb_pc;
+    // 双发射第二个提交 (仅当 inst1 也写回时有效)
+    assign commit_valid_1 = u_myCPU.wb_valid_1;
+    assign commit_pc_1    = u_myCPU.wb_pc_1;
 endmodule

@@ -3,9 +3,10 @@
 `default_nettype none
 
 /**
- * 模块名称：myCPU
- * 架构定义：15级非对称解耦流水线 (5级前端取指 + 1级解耦指令队列 + 9级后端执行控制)
- * 核心优化：全域时序重定向、分布式同步注毒网络、EX1级实时算术旁路前递
+ * myCPU_Dual — 双发射非对称解耦流水线
+ * 前端 64-bit 取指 -> IQ 缓冲 -> 后端双路 ALU 并行执行
+ * inst0: 全指令支持 (ALU/Branch/Load/Store/CSR/MDU)
+ * inst1: 受限 (仅简单 ALU 指令, 无依赖时与 inst0 并行发射)
  */
 module myCPU (
     // === 全局时钟与复位网络 (Clock & Reset Network) ===
@@ -339,613 +340,653 @@ module myCPU (
         (~f5_nlp_hit &  f5_any_taken)             // NLP missed → correct
     );
 
+
     // =========================================================================
-    // D-Block: 解耦中端 (非对称环形队列与译码器)
     // =========================================================================
-    
-    // --- 指令队列 (Instruction Queue) 物理例化 ---
-    // 负责吸收前端 64-bit 带宽带来的吞吐盈余，向后端提供平滑的 32-bit 单发流
-    logic id_valid_raw, id_valid; 
-    logic [31:0] id_pc, id_inst_raw, id_inst;
-    logic id_pred_taken; 
-    logic [31:0] id_pred_target;
-    
+    // 后端别名: 桥接前端已声明信号与后端 inst0 信号
+    // 这些信号在 F1-F5 段已声明, 此处 assign 连接而非重新声明
+    // =========================================================================
+    assign br_is_jump_or_branch = br_IsBranch_0 || (br_JmpType_0 != 2'b00);
+    // br_actual_target, br_actual_taken, br_pc 在前端已声明, 在 BR 段赋值
+    // br_valid, br_IsBranch, br_JmpType 的别名在各自的 assign/always 块中
+
+    // 前端 NLP 训练用的 BR 信号 (桥接到 inst0)
+    wire        br_valid    = br_valid_0;
+    wire        br_IsBranch = br_IsBranch_0;
+    wire [1:0]  br_JmpType  = br_JmpType_0;
+
+    // cpu_dual.sv 需要的信号 (ex1 from inst0)
+    wire ex1_valid          = ex1_valid_0;
+    wire ex1_IsEbreak       = ex1_IsEbreak_0;
+    wire [1:0] ex1_JmpType  = ex1_JmpType_0;
+    wire [31:0] ex1_pc      = ex1_pc_0;
+    wire [31:0] ex1_branch_target = ex1_br_tgt_0;
+    wire [31:0] id_inst     = id_inst_0;
+    // wb_valid, wb_pc for cpu_dual commit (inst0 only)
+    wire wb_valid = wb_valid_0;
+    wire [31:0] wb_pc = wb_pc_0;
+
+    // =========================================================================
+    // 双发射指令队列 (InstructionQueue)
+    // =========================================================================
+    logic [1:0]  dual_pop_count;
+    logic        id_valid_raw_0, id_valid_raw_1;
+    logic [31:0] id_pc_0, id_pc_1, id_inst_raw_0, id_inst_raw_1;
+    logic        id_pred_taken_0, id_pred_taken_1;
+    logic [31:0] id_pred_target_0, id_pred_target_1;
+
     InstructionQueue #(8, 32) iq_inst (
-        .clk(cpu_clk), 
-        .rst(cpu_rst), 
-        .flush(poison_IQ), // 接入最高优先级的后端真实异常重置网络
-        
-        // Push 端口 0 (第一条指令无条件尝试推入)
-        // 门控 ~stall_frontend：前端停顿时 F5 保持旧数据 valid，禁止重复推送
+        .clk(cpu_clk), .rst(cpu_rst), .flush(poison_IQ),
         .push_valid_0(f5_valid & ~stall_frontend),
         .push_pc_0(f5_pc_0), .push_inst_0(f5_inst_0),
         .push_pred_taken_0(f5_pred_taken_0), .push_pred_target_0(f5_pred_tgt_0),
-
-        // Push 端口 1：若第一条指令为无条件跳转 (JAL/JALR)，即使 BHT 未命中
-        // 也阻断第二条指令推入，防止死循环指令进入流水线触发假阳性 dead_loop
         .push_valid_1(f5_valid & ~stall_frontend & ~f5_pred_taken_0 &
                       ~((f5_inst_0[6:0] == 7'b1101111) | (f5_inst_0[6:0] == 7'b1100111))),
-        .push_pc_1(f5_pc_1), .push_inst_1(f5_inst_1), 
+        .push_pc_1(f5_pc_1), .push_inst_1(f5_inst_1),
         .push_pred_taken_1(f5_pred_taken_1), .push_pred_target_1(f5_pred_tgt_1),
-        
-        .almost_full(iq_almost_full), // 触发 F1-F5 反压的边界信号
-        
-        // Pop 端口 (单字出队至 ID 级)
-        .pop_ready(~stall_IQ_pop), 
-        .pop_valid(id_valid_raw),
-        .pop_pc(id_pc), 
-        .pop_inst(id_inst_raw), 
-        .pop_pred_taken(id_pred_taken), 
-        .pop_pred_target(id_pred_target)
+        .almost_full(iq_almost_full),
+        .pop_ready(~stall_IQ_pop), .pop_count(dual_pop_count),
+        .pop_valid_0(id_valid_raw_0), .pop_valid_1(id_valid_raw_1),
+        .pop_pc_0(id_pc_0), .pop_pc_1(id_pc_1),
+        .pop_inst_0(id_inst_raw_0), .pop_inst_1(id_inst_raw_1),
+        .pop_pred_taken_0(id_pred_taken_0), .pop_pred_taken_1(id_pred_taken_1),
+        .pop_pred_target_0(id_pred_target_0), .pop_pred_target_1(id_pred_target_1)
     );
 
-    // ID 级分布式注毒拦截器
-    // 若系统发生冲刷，强行向后端注入 NOP 气泡 (0x00000013 即 addi x0, x0, 0)
-    assign id_valid = id_valid_raw & ~poison_ID;
-    assign id_inst  = id_valid ? id_inst_raw : 32'h00000013; 
-    
-    wire [31:0] id_ret_pc = id_pc + 4; // 提前计算返回地址，切断 BranchUnit 到 ID 的时序长径
-
-    // 乘除法扩展 (M-Extension) 预解码标识
-    wire id_is_M = (id_inst[6:0] == 7'b0110011) && (id_inst[31:25] == 7'b0000001);
-
-    // =========================================================================
-    // 控制流译码器 (Control & Decoder Modules)
-    // =========================================================================
-    logic id_IsBranch, id_RegWen, id_MemWen, id_AluSrcB, id_CsrWen, id_CsrImmSel, id_IsEcall, id_IsEbreak, id_IsMret;
-    logic [1:0] id_JmpType, id_WbSel, id_AluSrcA, id_CsrOp;
-    logic [3:0] id_alu_ctrl; 
-    logic [31:0] id_imm, id_branch_target;
-
-    Control control_inst (
-        .inst(id_inst), 
-        .IsBranch(id_IsBranch), .JmpType(id_JmpType), 
-        .RegWen(id_RegWen), .MemWen(id_MemWen), .WbSel(id_WbSel), 
-        .AluSrcA(id_AluSrcA), .AluSrcB(id_AluSrcB), 
-        .CsrWen(id_CsrWen), .CsrOp(id_CsrOp), .CsrImmSel(id_CsrImmSel), 
-        .IsEcall(id_IsEcall), .IsEbreak(id_IsEbreak), .IsMret(id_IsMret)
-    );
-    
-    IMMGEN #(DATAWIDTH) immgen_inst (
-        .instr(id_inst), 
-        .imm(id_imm)
-    );
-    
-    ACTL actl_inst (
-        .opcode(id_inst[6:0]), 
-        .funct3(id_inst[14:12]), 
-        .funct7(id_inst[31:25]), 
-        .alu_ctrl(id_alu_ctrl)
-    );
-    
-    assign id_branch_target = id_pc + id_imm; // ID 级预计算分支目标地址
+    // ID 级毒药拦截 + NOP
+    logic id_valid_0, id_valid_1;
+    logic [31:0] id_inst_0, id_inst_1;
+    assign id_valid_0 = id_valid_raw_0 & ~poison_ID;
+    assign id_valid_1 = id_valid_raw_1 & ~poison_ID & id_valid_0;
+    assign id_inst_0  = id_valid_0 ? id_inst_raw_0 : 32'h00000013;
+    assign id_inst_1  = id_valid_1 ? id_inst_raw_1 : 32'h00000013;
+    wire [31:0] id_ret_pc_0 = id_pc_0 + 4;
+    wire [31:0] id_ret_pc_1 = id_pc_1 + 4;
 
     // =========================================================================
-    // Stage 6: RF 级 (通用寄存器组读取与译码信息传递)
+    // 双路译码
     // =========================================================================
-    
-    logic rf_valid, rf_is_M, rf_RegWen, rf_MemWen, rf_IsBranch, rf_AluSrcB, rf_CsrWen, rf_CsrImmSel, rf_IsEcall, rf_IsEbreak, rf_IsMret;
-    logic [31:0] rf_pc, rf_inst, rf_imm, rf_branch_target, rf_ret_pc, rf_pred_target;
-    logic [4:0]  rf_rd, rf_rs1, rf_rs2; 
-    logic [1:0]  rf_JmpType, rf_WbSel, rf_AluSrcA, rf_CsrOp;
-    logic [3:0]  rf_alu_ctrl; 
-    logic [2:0]  rf_funct3; 
-    logic [11:0] rf_csr_idx; 
-    logic rf_pred_taken;
+    logic id_IsBranch_0, id_RegWen_0, id_MemWen_0, id_AluSrcB_0, id_CsrWen_0, id_CsrImmSel_0, id_IsEcall_0, id_IsEbreak_0, id_IsMret_0;
+    logic [1:0] id_JmpType_0, id_WbSel_0, id_AluSrcA_0, id_CsrOp_0;
+    logic [3:0] id_alu_ctrl_0;
+    logic [31:0] id_imm_0, id_branch_target_0;
+    wire id_is_M_0 = (id_inst_0[6:0] == 7'b0110011) && (id_inst_0[31:25] == 7'b0000001);
 
-    ID_RF_Reg #(DATAWIDTH) id_rf_reg (
+    Control c0(.inst(id_inst_0), .IsBranch(id_IsBranch_0), .JmpType(id_JmpType_0),
+        .RegWen(id_RegWen_0), .MemWen(id_MemWen_0), .WbSel(id_WbSel_0),
+        .AluSrcA(id_AluSrcA_0), .AluSrcB(id_AluSrcB_0),
+        .CsrWen(id_CsrWen_0), .CsrOp(id_CsrOp_0), .CsrImmSel(id_CsrImmSel_0),
+        .IsEcall(id_IsEcall_0), .IsEbreak(id_IsEbreak_0), .IsMret(id_IsMret_0));
+    IMMGEN #(DATAWIDTH) ig0(.instr(id_inst_0), .imm(id_imm_0));
+    ACTL al0(.opcode(id_inst_0[6:0]), .funct3(id_inst_0[14:12]), .funct7(id_inst_0[31:25]), .alu_ctrl(id_alu_ctrl_0));
+    assign id_branch_target_0 = id_pc_0 + id_imm_0;
+
+    // inst1 译码
+    logic id_IsBranch_1, id_RegWen_1, id_MemWen_1, id_AluSrcB_1, id_CsrWen_1, id_CsrImmSel_1, id_IsEcall_1, id_IsEbreak_1, id_IsMret_1;
+    logic [1:0] id_JmpType_1, id_WbSel_1, id_AluSrcA_1, id_CsrOp_1;
+    logic [3:0] id_alu_ctrl_1;
+    logic [31:0] id_imm_1, id_branch_target_1;
+    wire id_is_M_1 = (id_inst_1[6:0] == 7'b0110011) && (id_inst_1[31:25] == 7'b0000001);
+
+    Control c1(.inst(id_inst_1), .IsBranch(id_IsBranch_1), .JmpType(id_JmpType_1),
+        .RegWen(id_RegWen_1), .MemWen(id_MemWen_1), .WbSel(id_WbSel_1),
+        .AluSrcA(id_AluSrcA_1), .AluSrcB(id_AluSrcB_1),
+        .CsrWen(id_CsrWen_1), .CsrOp(id_CsrOp_1), .CsrImmSel(id_CsrImmSel_1),
+        .IsEcall(id_IsEcall_1), .IsEbreak(id_IsEbreak_1), .IsMret(id_IsMret_1));
+    IMMGEN #(DATAWIDTH) ig1(.instr(id_inst_1), .imm(id_imm_1));
+    ACTL al1(.opcode(id_inst_1[6:0]), .funct3(id_inst_1[14:12]), .funct7(id_inst_1[31:25]), .alu_ctrl(id_alu_ctrl_1));
+    assign id_branch_target_1 = id_pc_1 + id_imm_1;
+
+    // =========================================================================
+    // 双发射判定
+    // =========================================================================
+    wire inst1_simple_alu = !id_IsBranch_1 && (id_JmpType_1 == 2'b00) &&
+        !id_MemWen_1 && (id_WbSel_1 != 2'b10) && !id_is_M_1 &&
+        !id_IsEcall_1 && !id_IsEbreak_1 && !id_IsMret_1 && !id_CsrWen_1;
+    wire waw_conflict = id_RegWen_0 && id_RegWen_1 && (id_inst_0[11:7] != 5'd0) &&
+                        (id_inst_0[11:7] == id_inst_1[11:7]);
+    wire load_use_0_to_1 = (id_WbSel_0 == 2'b10) && id_RegWen_0 && (id_inst_0[11:7] != 5'd0) &&
+        (((id_inst_1[19:15] != 5'd0) && (id_inst_0[11:7] == id_inst_1[19:15])) ||
+         ((id_inst_1[24:20] != 5'd0) && (id_inst_0[11:7] == id_inst_1[24:20])));
+    wire can_dual = id_valid_1 && inst1_simple_alu && !waw_conflict && !load_use_0_to_1;
+    assign dual_pop_count = can_dual ? 2'd2 : (id_valid_0 ? 2'd1 : 2'd0);
+
+    // =========================================================================
+    // Stage 6: RF 级 (双路寄存器读取)
+    // =========================================================================
+    logic rf_valid_0, rf_valid_1;
+    logic [31:0] rf_pc_0, rf_pc_1, rf_inst_0, rf_inst_1, rf_imm_0, rf_imm_1;
+    logic [31:0] rf_branch_target_0, rf_branch_target_1, rf_ret_pc_0, rf_ret_pc_1;
+    logic [31:0] rf_pred_target_0, rf_pred_target_1;
+    logic [4:0]  rf_rd_0, rf_rd_1, rf_rs1_0, rf_rs1_1, rf_rs2_0, rf_rs2_1;
+    logic [1:0]  rf_JmpType_0, rf_JmpType_1, rf_WbSel_0, rf_WbSel_1;
+    logic [1:0]  rf_AluSrcA_0, rf_AluSrcA_1, rf_CsrOp_0, rf_CsrOp_1;
+    logic [3:0]  rf_alu_ctrl_0, rf_alu_ctrl_1;
+    logic [2:0]  rf_funct3_0, rf_funct3_1;
+    logic [11:0] rf_csr_idx_0, rf_csr_idx_1;
+    logic rf_pred_taken_0, rf_pred_taken_1;
+    logic rf_RegWen_0, rf_RegWen_1, rf_MemWen_0, rf_MemWen_1;
+    logic rf_IsBranch_0, rf_IsBranch_1, rf_AluSrcB_0, rf_AluSrcB_1;
+    logic rf_CsrWen_0, rf_CsrWen_1, rf_CsrImmSel_0, rf_CsrImmSel_1;
+    logic rf_IsEcall_0, rf_IsEcall_1, rf_IsEbreak_0, rf_IsEbreak_1, rf_IsMret_0, rf_IsMret_1;
+    logic rf_is_M_0, rf_is_M_1;
+
+    // inst0 pipeline register
+    ID_RF_Reg #(DATAWIDTH) id_rf_0 (
         .clk(cpu_clk), .rst(cpu_rst), .stall(stall_RF), .poison(poison_RF),
-        .id_valid(id_valid), .id_is_M(id_is_M), .id_pc(id_pc), .id_inst(id_inst), .id_imm(id_imm), .id_branch_target(id_branch_target), .id_ret_pc(id_ret_pc),
-        .id_rd(id_inst[11:7]), .id_rs1(id_inst[19:15]), .id_rs2(id_inst[24:20]),
-        .id_RegWen(id_RegWen), .id_MemWen(id_MemWen), .id_IsBranch(id_IsBranch), .id_AluSrcB(id_AluSrcB), .id_JmpType(id_JmpType), .id_WbSel(id_WbSel), .id_AluSrcA(id_AluSrcA),
-        .id_alu_ctrl(id_alu_ctrl), .id_funct3(id_inst[14:12]), .id_csr_idx(id_inst[31:20]), .id_CsrWen(id_CsrWen), .id_CsrImmSel(id_CsrImmSel), .id_IsEcall(id_IsEcall), .id_IsEbreak(id_IsEbreak), .id_IsMret(id_IsMret), .id_CsrOp(id_CsrOp),
-        .id_pred_taken(id_pred_taken), .id_pred_target(id_pred_target),
-        
-        .rf_valid(rf_valid), .rf_is_M(rf_is_M), .rf_pc(rf_pc), .rf_inst(rf_inst), .rf_imm(rf_imm), .rf_branch_target(rf_branch_target), .rf_ret_pc(rf_ret_pc),
-        .rf_rd(rf_rd), .rf_rs1(rf_rs1), .rf_rs2(rf_rs2),
-        .rf_RegWen(rf_RegWen), .rf_MemWen(rf_MemWen), .rf_IsBranch(rf_IsBranch), .rf_AluSrcB(rf_AluSrcB), .rf_JmpType(rf_JmpType), .rf_WbSel(rf_WbSel), .rf_AluSrcA(rf_AluSrcA),
-        .rf_alu_ctrl(rf_alu_ctrl), .rf_funct3(rf_funct3), .rf_csr_idx(rf_csr_idx), .rf_CsrWen(rf_CsrWen), .rf_CsrImmSel(rf_CsrImmSel), .rf_IsEcall(rf_IsEcall), .rf_IsEbreak(rf_IsEbreak), .rf_IsMret(rf_IsMret), .rf_CsrOp(rf_CsrOp),
-        .rf_pred_taken(rf_pred_taken), .rf_pred_target(rf_pred_target)
+        .id_valid(id_valid_0), .id_is_M(id_is_M_0), .id_pc(id_pc_0), .id_inst(id_inst_0),
+        .id_imm(id_imm_0), .id_branch_target(id_branch_target_0), .id_ret_pc(id_ret_pc_0),
+        .id_rd(id_inst_0[11:7]), .id_rs1(id_inst_0[19:15]), .id_rs2(id_inst_0[24:20]),
+        .id_RegWen(id_RegWen_0), .id_MemWen(id_MemWen_0), .id_IsBranch(id_IsBranch_0),
+        .id_AluSrcB(id_AluSrcB_0), .id_JmpType(id_JmpType_0), .id_WbSel(id_WbSel_0),
+        .id_AluSrcA(id_AluSrcA_0), .id_alu_ctrl(id_alu_ctrl_0),
+        .id_funct3(id_inst_0[14:12]), .id_csr_idx(id_inst_0[31:20]),
+        .id_CsrWen(id_CsrWen_0), .id_CsrImmSel(id_CsrImmSel_0),
+        .id_IsEcall(id_IsEcall_0), .id_IsEbreak(id_IsEbreak_0), .id_IsMret(id_IsMret_0),
+        .id_CsrOp(id_CsrOp_0), .id_pred_taken(id_pred_taken_0), .id_pred_target(id_pred_target_0),
+        .rf_valid(rf_valid_0), .rf_is_M(rf_is_M_0), .rf_pc(rf_pc_0), .rf_inst(rf_inst_0),
+        .rf_imm(rf_imm_0), .rf_branch_target(rf_branch_target_0), .rf_ret_pc(rf_ret_pc_0),
+        .rf_rd(rf_rd_0), .rf_rs1(rf_rs1_0), .rf_rs2(rf_rs2_0),
+        .rf_RegWen(rf_RegWen_0), .rf_MemWen(rf_MemWen_0), .rf_IsBranch(rf_IsBranch_0),
+        .rf_AluSrcB(rf_AluSrcB_0), .rf_JmpType(rf_JmpType_0), .rf_WbSel(rf_WbSel_0),
+        .rf_AluSrcA(rf_AluSrcA_0), .rf_alu_ctrl(rf_alu_ctrl_0), .rf_funct3(rf_funct3_0),
+        .rf_csr_idx(rf_csr_idx_0), .rf_CsrWen(rf_CsrWen_0), .rf_CsrImmSel(rf_CsrImmSel_0),
+        .rf_IsEcall(rf_IsEcall_0), .rf_IsEbreak(rf_IsEbreak_0), .rf_IsMret(rf_IsMret_0),
+        .rf_CsrOp(rf_CsrOp_0), .rf_pred_taken(rf_pred_taken_0), .rf_pred_target(rf_pred_target_0)
     );
 
-    logic [31:0] rf_rs1_data_raw, rf_rs2_data_raw; 
-    logic [31:0] wb_data; 
-    logic [4:0]  wb_rd; 
-    logic        wb_RegWen;
-    
-    // 🌟 修正项：严格拦截被注毒指令的物理状态写入
+    // inst1 pipeline register (only valid when can_dual)
+    logic id_valid_1_eff;
+    assign id_valid_1_eff = id_valid_1 & can_dual;
+    ID_RF_Reg #(DATAWIDTH) id_rf_1 (
+        .clk(cpu_clk), .rst(cpu_rst), .stall(stall_RF), .poison(poison_RF),
+        .id_valid(id_valid_1_eff), .id_is_M(id_is_M_1), .id_pc(id_pc_1), .id_inst(id_inst_1),
+        .id_imm(id_imm_1), .id_branch_target(id_branch_target_1), .id_ret_pc(id_ret_pc_1),
+        .id_rd(id_inst_1[11:7]), .id_rs1(id_inst_1[19:15]), .id_rs2(id_inst_1[24:20]),
+        .id_RegWen(id_RegWen_1), .id_MemWen(id_MemWen_1), .id_IsBranch(id_IsBranch_1),
+        .id_AluSrcB(id_AluSrcB_1), .id_JmpType(id_JmpType_1), .id_WbSel(id_WbSel_1),
+        .id_AluSrcA(id_AluSrcA_1), .id_alu_ctrl(id_alu_ctrl_1),
+        .id_funct3(id_inst_1[14:12]), .id_csr_idx(id_inst_1[31:20]),
+        .id_CsrWen(id_CsrWen_1), .id_CsrImmSel(id_CsrImmSel_1),
+        .id_IsEcall(id_IsEcall_1), .id_IsEbreak(id_IsEbreak_1), .id_IsMret(id_IsMret_1),
+        .id_CsrOp(id_CsrOp_1), .id_pred_taken(id_pred_taken_1), .id_pred_target(id_pred_target_1),
+        .rf_valid(rf_valid_1), .rf_is_M(rf_is_M_1), .rf_pc(rf_pc_1), .rf_inst(rf_inst_1),
+        .rf_imm(rf_imm_1), .rf_branch_target(rf_branch_target_1), .rf_ret_pc(rf_ret_pc_1),
+        .rf_rd(rf_rd_1), .rf_rs1(rf_rs1_1), .rf_rs2(rf_rs2_1),
+        .rf_RegWen(rf_RegWen_1), .rf_MemWen(rf_MemWen_1), .rf_IsBranch(rf_IsBranch_1),
+        .rf_AluSrcB(rf_AluSrcB_1), .rf_JmpType(rf_JmpType_1), .rf_WbSel(rf_WbSel_1),
+        .rf_AluSrcA(rf_AluSrcA_1), .rf_alu_ctrl(rf_alu_ctrl_1), .rf_funct3(rf_funct3_1),
+        .rf_csr_idx(rf_csr_idx_1), .rf_CsrWen(rf_CsrWen_1), .rf_CsrImmSel(rf_CsrImmSel_1),
+        .rf_IsEcall(rf_IsEcall_1), .rf_IsEbreak(rf_IsEbreak_1), .rf_IsMret(rf_IsMret_1),
+        .rf_CsrOp(rf_CsrOp_1), .rf_pred_taken(rf_pred_taken_1), .rf_pred_target(rf_pred_target_1)
+    );
+
+    // RF: 4-read 2-write
+    logic [31:0] rf_rs1_dat_0, rf_rs2_dat_0, rf_rs1_dat_1, rf_rs2_dat_1;
+    logic [31:0] wb_data_0, wb_data_1;
+    logic [4:0]  wb_rd_0, wb_rd_1;
+    logic        wb_RegWen_0, wb_RegWen_1;
+
     RF #(5, DATAWIDTH) u_rf (
-        .clk(cpu_clk), .rst(cpu_rst), .wen(wb_valid & wb_RegWen), .waddr(wb_rd), .wdata(wb_data),
-        .rR1(rf_rs1), .rR2(rf_rs2), .rR1_data(rf_rs1_data_raw), .rR2_data(rf_rs2_data_raw)
+        .clk(cpu_clk), .rst(cpu_rst),
+        .wen0  (wb_valid_0 & wb_RegWen_0),  .waddr0(wb_rd_0),  .wdata0(wb_data_0),
+        .wen1  (wb_valid_1 & wb_RegWen_1),  .waddr1(wb_rd_1),  .wdata1(wb_data_1),
+        .rR1_0(rf_rs1_0), .rR2_0(rf_rs2_0), .rR1_1(rf_rs1_1), .rR2_1(rf_rs2_1),
+        .rR1_0_data(rf_rs1_dat_0), .rR2_0_data(rf_rs2_dat_0),
+        .rR1_1_data(rf_rs1_dat_1), .rR2_1_data(rf_rs2_dat_1)
     );
 
     // =========================================================================
-    // RF 级提前分支解析 (Early Branch Resolution)
-    //
-    // 无 RAW 冒险时直接用 RF 原始数据做比较，比 BR 级提前 2 拍发出冲刷。
-    // 有 RAW 冒险 (rf_rs1/rs2 被前序指令写入中) 时退回 BR 级正常解析。
-    // JAL/JALR 无条件跳转无需比较，只检查 rs1 冒险 (JALR)。
+    // RF 级提前分支解析 (inst0 only, inst1 is never a branch)
     // =========================================================================
-    wire rf_is_control = rf_IsBranch || (rf_JmpType != 2'b00);
-
-    // RAW 冒险检测: rf_rs1/rs2 是否有待写入的指令在流水线中
-    wire rs1_has_raw = (rf_rs1 != 5'b0) && (
-        (ex1_valid  & ex1_RegWen  & (ex1_rd  == rf_rs1)) |
-        (br_valid   & br_RegWen   & (br_rd   == rf_rs1)) |
-        (mem1_valid & mem1_RegWen & (mem1_rd == rf_rs1)) |
-        (mem2_valid & mem2_RegWen & (mem2_rd == rf_rs1)) |
-        (wb_valid   & wb_RegWen   & (wb_rd   == rf_rs1))
-    );
-    wire rs2_has_raw = (rf_rs2 != 5'b0) && (
-        (ex1_valid  & ex1_RegWen  & (ex1_rd  == rf_rs2)) |
-        (br_valid   & br_RegWen   & (br_rd   == rf_rs2)) |
-        (mem1_valid & mem1_RegWen & (mem1_rd == rf_rs2)) |
-        (mem2_valid & mem2_RegWen & (mem2_rd == rf_rs2)) |
-        (wb_valid   & wb_RegWen   & (wb_rd   == rf_rs2))
-    );
-    wire early_raw_hazard = rs1_has_raw | rs2_has_raw;
-
-    // 条件分支快速比较 (复用 BranchUnit 逻辑)
-    wire rf_is_equal  = (rf_rs1_data_raw == rf_rs2_data_raw);
-    wire rf_is_less_s = ($signed(rf_rs1_data_raw) < $signed(rf_rs2_data_raw));
-    wire rf_is_less_u = (rf_rs1_data_raw < rf_rs2_data_raw);
-    logic rf_take_branch;
+    wire rf_is_ctrl_0 = rf_IsBranch_0 || (rf_JmpType_0 != 2'b00);
+    wire rs1_raw_0 = (rf_rs1_0 != 5'b0) && (
+        (ex1_valid_0  & ex1_RegWen_0  & (ex1_rd_0  == rf_rs1_0)) |
+        (br_valid_0   & br_RegWen_0   & (br_rd_0   == rf_rs1_0)) |
+        (mem1_valid_0 & mem1_RegWen_0 & (mem1_rd_0 == rf_rs1_0)) );
+    wire rs2_raw_0 = (rf_rs2_0 != 5'b0) && (
+        (ex1_valid_0  & ex1_RegWen_0  & (ex1_rd_0  == rf_rs2_0)) |
+        (br_valid_0   & br_RegWen_0   & (br_rd_0   == rf_rs2_0)) |
+        (mem1_valid_0 & mem1_RegWen_0 & (mem1_rd_0 == rf_rs2_0)) );
+    wire rf_raw_haz = rs1_raw_0 | rs2_raw_0;
+    wire rf_eq  = (rf_rs1_dat_0 == rf_rs2_dat_0);
+    wire rf_lts = ($signed(rf_rs1_dat_0) < $signed(rf_rs2_dat_0));
+    wire rf_ltu = (rf_rs1_dat_0 < rf_rs2_dat_0);
+    logic rf_take;
     always_comb begin
-        rf_take_branch = 1'b0;
-        if (rf_IsBranch) begin
-            case (rf_funct3)
-                3'b000: rf_take_branch = rf_is_equal;
-                3'b001: rf_take_branch = !rf_is_equal;
-                3'b100: rf_take_branch = rf_is_less_s;
-                3'b101: rf_take_branch = !rf_is_less_s;
-                3'b110: rf_take_branch = rf_is_less_u;
-                3'b111: rf_take_branch = !rf_is_less_u;
-                default: rf_take_branch = 1'b0;
+        rf_take = 1'b0;
+        if (rf_IsBranch_0)
+            case (rf_funct3_0)
+                3'b000: rf_take = rf_eq;  3'b001: rf_take = !rf_eq;
+                3'b100: rf_take = rf_lts; 3'b101: rf_take = !rf_lts;
+                3'b110: rf_take = rf_ltu; 3'b111: rf_take = !rf_ltu;
+                default: rf_take = 1'b0;
             endcase
-        end
     end
-
-    // 真实方向: JAL/JALR 无条件 taken, 条件分支看比较结果
-    wire rf_actual_taken = (rf_JmpType == 2'b01) ? 1'b1 :       // JAL
-                           (rf_JmpType == 2'b10) ? 1'b1 :       // JALR (RAW 检查已覆盖 rs1)
-                           (rf_IsBranch) ? rf_take_branch : 1'b0;
-
-    // JALR 目标地址 (rf_rs1 + rf_imm, 最低位清零)
-    wire [31:0] rf_jalr_target = (rf_rs1_data_raw + rf_imm) & ~32'h1;
-    wire [31:0] early_target = (rf_JmpType == 2'b10) ? rf_jalr_target :
-                               (rf_actual_taken)     ? rf_branch_target :
-                                                       rf_ret_pc;
-
-    // 提前误判检测: 排除 ECALL/EBREAK/MRET (需要 CSR 处理)
-    wire early_mispredict = rf_valid & rf_is_control & ~early_raw_hazard &
-                            ~(rf_IsEcall | rf_IsEbreak | rf_IsMret) &
-                            (rf_actual_taken ^ rf_pred_taken);
-
-    // early_flush: 组合逻辑, 当拍检测当拍生效。打入一个脉冲寄存器防止
-    // stall_RF 期间连续触发 (连续毒化会导致 IQ 空转而无法推进分支自身)
+    wire rf_act_taken = (rf_JmpType_0 != 2'b00) || (rf_IsBranch_0 && rf_take);
+    wire [31:0] rf_jalr_tgt = (rf_rs1_dat_0 + rf_imm_0) & ~32'h1;
+    wire [31:0] early_tgt = (rf_JmpType_0 == 2'b10) ? rf_jalr_tgt :
+                            (rf_act_taken)         ? rf_branch_target_0 : rf_ret_pc_0;
+    wire early_misp = rf_valid_0 & rf_is_ctrl_0 & ~rf_raw_haz &
+                      ~(rf_IsEcall_0 | rf_IsEbreak_0 | rf_IsMret_0) &
+                      (rf_act_taken ^ rf_pred_taken_0);
     logic early_done;
     always_ff @(posedge cpu_clk) begin
-        if (cpu_rst || !rf_valid) early_done <= 1'b0;
-        else if (early_mispredict) early_done <= 1'b1;
+        if (cpu_rst || !rf_valid_0) early_done <= 1'b0;
+        else if (early_misp) early_done <= 1'b1;
     end
-    (* max_fanout = "16" *) wire early_flush = early_mispredict & ~early_done;
-    wire [31:0] early_flush_target = early_target;
+    (* max_fanout = "16" *) wire early_flush = early_misp & ~early_done;
+    wire [31:0] early_flush_target = early_tgt;
 
     // =========================================================================
-    // Stage 7: EX1 级 (执行逻辑与前递闭环)
+    // Stage 7: EX1 级 (双 ALU + inter-inst forwarding)
     // =========================================================================
+    logic ex1_valid_0, ex1_valid_1;
+    logic [31:0] ex1_pc_0, ex1_pc_1, ex1_inst_0, ex1_inst_1;
+    logic [31:0] ex1_imm_0, ex1_imm_1, ex1_br_tgt_0, ex1_br_tgt_1, ex1_ret_pc_0, ex1_ret_pc_1;
+    logic [31:0] ex1_pred_tgt_0, ex1_pred_tgt_1;
+    logic [31:0] ex1_rs1_raw_0, ex1_rs1_raw_1, ex1_rs2_raw_0, ex1_rs2_raw_1;
+    logic [4:0]  ex1_rd_0, ex1_rd_1, ex1_rs1_0, ex1_rs1_1, ex1_rs2_0, ex1_rs2_1;
+    logic [1:0]  ex1_JmpType_0, ex1_JmpType_1, ex1_WbSel_0, ex1_WbSel_1;
+    logic [1:0]  ex1_AluSrcA_0, ex1_AluSrcA_1, ex1_CsrOp_0, ex1_CsrOp_1;
+    logic [3:0]  ex1_alu_ctrl_0, ex1_alu_ctrl_1;
+    logic [2:0]  ex1_funct3_0, ex1_funct3_1;
+    logic [11:0] ex1_csr_idx_0, ex1_csr_idx_1;
+    logic ex1_is_M_0, ex1_is_M_1, ex1_RegWen_0, ex1_RegWen_1, ex1_MemWen_0, ex1_MemWen_1;
+    logic ex1_IsBranch_0, ex1_IsBranch_1, ex1_AluSrcB_0, ex1_AluSrcB_1;
+    logic ex1_CsrWen_0, ex1_CsrWen_1, ex1_CsrImmSel_0, ex1_CsrImmSel_1;
+    logic ex1_IsEcall_0, ex1_IsEcall_1, ex1_IsEbreak_0, ex1_IsEbreak_1, ex1_IsMret_0, ex1_IsMret_1;
+    logic ex1_pred_taken_0, ex1_pred_taken_1;
 
-    logic ex1_valid, ex1_is_M, ex1_RegWen, ex1_MemWen, ex1_IsBranch, ex1_AluSrcB, ex1_CsrWen, ex1_CsrImmSel, ex1_IsEcall, ex1_IsEbreak, ex1_IsMret;
-    logic [31:0] ex1_pc, ex1_inst, ex1_imm, ex1_branch_target, ex1_ret_pc, ex1_pred_target;
-    logic [31:0] ex1_rs1_data_raw, ex1_rs2_data_raw; // 接收来自 RF 级的原始读出数据
-    logic [4:0]  ex1_rd, ex1_rs1, ex1_rs2;
-    logic [1:0]  ex1_JmpType, ex1_WbSel, ex1_AluSrcA, ex1_CsrOp; 
-    logic [3:0]  ex1_alu_ctrl; 
-    logic [2:0]  ex1_funct3; 
-    logic [11:0] ex1_csr_idx; 
-    logic ex1_pred_taken;
-
-    RF_EX1_Reg #(DATAWIDTH) rf_ex1_reg (
+    // inst0 EX1 register
+    RF_EX1_Reg #(DATAWIDTH) rf_ex1_0 (
         .clk(cpu_clk), .rst(cpu_rst), .stall(stall_EX1), .poison(poison_EX1),
-        .rf_valid(rf_valid), .rf_is_M(rf_is_M), .rf_pc(rf_pc), .rf_inst(rf_inst), .rf_imm(rf_imm), .rf_branch_target(rf_branch_target), .rf_ret_pc(rf_ret_pc),
-        .rf_fw_rs1_data(rf_rs1_data_raw), .rf_fw_rs2_data(rf_rs2_data_raw), .rf_rd(rf_rd), // 将未前递的数据送入 EX1
-        .rf_RegWen(rf_RegWen), .rf_MemWen(rf_MemWen), .rf_IsBranch(rf_IsBranch), .rf_AluSrcB(rf_AluSrcB), .rf_JmpType(rf_JmpType), .rf_WbSel(rf_WbSel), .rf_AluSrcA(rf_AluSrcA),
-        .rf_alu_ctrl(rf_alu_ctrl), .rf_funct3(rf_funct3), .rf_csr_idx(rf_csr_idx), .rf_CsrWen(rf_CsrWen), .rf_CsrImmSel(rf_CsrImmSel), .rf_IsEcall(rf_IsEcall), .rf_IsEbreak(rf_IsEbreak), .rf_IsMret(rf_IsMret), .rf_CsrOp(rf_CsrOp),
-        .rf_pred_taken(rf_pred_taken), .rf_pred_target(rf_pred_target),
-        
-        .ex1_valid(ex1_valid), .ex1_is_M(ex1_is_M), .ex1_pc(ex1_pc), .ex1_inst(ex1_inst), .ex1_imm(ex1_imm), .ex1_branch_target(ex1_branch_target), .ex1_ret_pc(ex1_ret_pc),
-        .ex1_fw_rs1_data(ex1_rs1_data_raw), .ex1_fw_rs2_data(ex1_rs2_data_raw), .ex1_rd(ex1_rd),
-        .ex1_RegWen(ex1_RegWen), .ex1_MemWen(ex1_MemWen), .ex1_IsBranch(ex1_IsBranch), .ex1_AluSrcB(ex1_AluSrcB), .ex1_JmpType(ex1_JmpType), .ex1_WbSel(ex1_WbSel), .ex1_AluSrcA(ex1_AluSrcA),
-        .ex1_alu_ctrl(ex1_alu_ctrl), .ex1_funct3(ex1_funct3), .ex1_csr_idx(ex1_csr_idx), .ex1_CsrWen(ex1_CsrWen), .ex1_CsrImmSel(ex1_CsrImmSel), .ex1_IsEcall(ex1_IsEcall), .ex1_IsEbreak(ex1_IsEbreak), .ex1_IsMret(ex1_IsMret), .ex1_CsrOp(ex1_CsrOp),
-        .ex1_pred_taken(ex1_pred_taken), .ex1_pred_target(ex1_pred_target)
-    );
-    
-    // 从指令中直接提取以保障前递多路选择器的实时性
-    assign ex1_rs1 = ex1_inst[19:15];
-    assign ex1_rs2 = ex1_inst[24:20];
-
-    // 🌟 修正项：前递网络移位至 EX1 级实时判决，确保与数据流周期绝对对齐
-    logic [2:0] real_ex_forward_A, real_ex_forward_B;
-    logic br_RegWen, mem1_RegWen, mem2_RegWen; 
-    logic [4:0] br_rd, mem1_rd, mem2_rd;
-    logic [31:0] br_fw_data, mem1_fw_data, mem2_fw_data;
-
-    // 🌟 修正项：前递网络必须且只能监听有效指令，彻底切断幽灵数据的旁路污染
-    ForwardingUnit fw_inst (
-        .id_rs1(ex1_rs1), .id_rs2(ex1_rs2),
-        .ex_RegWen  (br_valid & br_RegWen),     .ex_rd  (br_rd),   // 下一级：BR
-        .mem1_RegWen(mem1_valid & mem1_RegWen), .mem1_rd(mem1_rd), // 下下级：MEM1
-        .mem2_RegWen(mem2_valid & mem2_RegWen), .mem2_rd(mem2_rd), // 下下下级：MEM2
-        .wb_RegWen  (wb_valid & wb_RegWen),     .wb_rd  (wb_rd),   // 下下下下级：WB
-        .id_forward_A(real_ex_forward_A), .id_forward_B(real_ex_forward_B)
+        .rf_valid(rf_valid_0), .rf_is_M(rf_is_M_0), .rf_pc(rf_pc_0), .rf_inst(rf_inst_0),
+        .rf_imm(rf_imm_0), .rf_branch_target(rf_branch_target_0), .rf_ret_pc(rf_ret_pc_0),
+        .rf_fw_rs1_data(rf_rs1_dat_0), .rf_fw_rs2_data(rf_rs2_dat_0),
+        .rf_rd(rf_rd_0), .rf_RegWen(rf_RegWen_0), .rf_MemWen(rf_MemWen_0),
+        .rf_IsBranch(rf_IsBranch_0), .rf_AluSrcB(rf_AluSrcB_0),
+        .rf_JmpType(rf_JmpType_0), .rf_WbSel(rf_WbSel_0), .rf_AluSrcA(rf_AluSrcA_0),
+        .rf_alu_ctrl(rf_alu_ctrl_0), .rf_funct3(rf_funct3_0), .rf_csr_idx(rf_csr_idx_0),
+        .rf_CsrWen(rf_CsrWen_0), .rf_CsrImmSel(rf_CsrImmSel_0),
+        .rf_IsEcall(rf_IsEcall_0), .rf_IsEbreak(rf_IsEbreak_0), .rf_IsMret(rf_IsMret_0),
+        .rf_CsrOp(rf_CsrOp_0), .rf_pred_taken(rf_pred_taken_0), .rf_pred_target(rf_pred_target_0),
+        .ex1_valid(ex1_valid_0), .ex1_is_M(ex1_is_M_0), .ex1_pc(ex1_pc_0),
+        .ex1_inst(ex1_inst_0), .ex1_imm(ex1_imm_0),
+        .ex1_branch_target(ex1_br_tgt_0), .ex1_ret_pc(ex1_ret_pc_0),
+        .ex1_fw_rs1_data(ex1_rs1_raw_0), .ex1_fw_rs2_data(ex1_rs2_raw_0),
+        .ex1_rd(ex1_rd_0), .ex1_RegWen(ex1_RegWen_0), .ex1_MemWen(ex1_MemWen_0),
+        .ex1_IsBranch(ex1_IsBranch_0), .ex1_AluSrcB(ex1_AluSrcB_0),
+        .ex1_JmpType(ex1_JmpType_0), .ex1_WbSel(ex1_WbSel_0), .ex1_AluSrcA(ex1_AluSrcA_0),
+        .ex1_alu_ctrl(ex1_alu_ctrl_0), .ex1_funct3(ex1_funct3_0), .ex1_csr_idx(ex1_csr_idx_0),
+        .ex1_CsrWen(ex1_CsrWen_0), .ex1_CsrImmSel(ex1_CsrImmSel_0),
+        .ex1_IsEcall(ex1_IsEcall_0), .ex1_IsEbreak(ex1_IsEbreak_0), .ex1_IsMret(ex1_IsMret_0),
+        .ex1_CsrOp(ex1_CsrOp_0), .ex1_pred_taken(ex1_pred_taken_0), .ex1_pred_target(ex1_pred_tgt_0)
     );
 
-    logic [31:0] ex1_fw_rs1_data, ex1_fw_rs2_data;
+    // inst1 EX1 register (valid only when can_dual)
+    RF_EX1_Reg #(DATAWIDTH) rf_ex1_1 (
+        .clk(cpu_clk), .rst(cpu_rst), .stall(stall_EX1), .poison(poison_EX1),
+        .rf_valid(rf_valid_1), .rf_is_M(rf_is_M_1), .rf_pc(rf_pc_1), .rf_inst(rf_inst_1),
+        .rf_imm(rf_imm_1), .rf_branch_target(rf_branch_target_1), .rf_ret_pc(rf_ret_pc_1),
+        .rf_fw_rs1_data(rf_rs1_dat_1), .rf_fw_rs2_data(rf_rs2_dat_1),
+        .rf_rd(rf_rd_1), .rf_RegWen(rf_RegWen_1), .rf_MemWen(rf_MemWen_1),
+        .rf_IsBranch(rf_IsBranch_1), .rf_AluSrcB(rf_AluSrcB_1),
+        .rf_JmpType(rf_JmpType_1), .rf_WbSel(rf_WbSel_1), .rf_AluSrcA(rf_AluSrcA_1),
+        .rf_alu_ctrl(rf_alu_ctrl_1), .rf_funct3(rf_funct3_1), .rf_csr_idx(rf_csr_idx_1),
+        .rf_CsrWen(rf_CsrWen_1), .rf_CsrImmSel(rf_CsrImmSel_1),
+        .rf_IsEcall(rf_IsEcall_1), .rf_IsEbreak(rf_IsEbreak_1), .rf_IsMret(rf_IsMret_1),
+        .rf_CsrOp(rf_CsrOp_1), .rf_pred_taken(rf_pred_taken_1), .rf_pred_target(rf_pred_target_1),
+        .ex1_valid(ex1_valid_1), .ex1_is_M(ex1_is_M_1), .ex1_pc(ex1_pc_1),
+        .ex1_inst(ex1_inst_1), .ex1_imm(ex1_imm_1),
+        .ex1_branch_target(ex1_br_tgt_1), .ex1_ret_pc(ex1_ret_pc_1),
+        .ex1_fw_rs1_data(ex1_rs1_raw_1), .ex1_fw_rs2_data(ex1_rs2_raw_1),
+        .ex1_rd(ex1_rd_1), .ex1_RegWen(ex1_RegWen_1), .ex1_MemWen(ex1_MemWen_1),
+        .ex1_IsBranch(ex1_IsBranch_1), .ex1_AluSrcB(ex1_AluSrcB_1),
+        .ex1_JmpType(ex1_JmpType_1), .ex1_WbSel(ex1_WbSel_1), .ex1_AluSrcA(ex1_AluSrcA_1),
+        .ex1_alu_ctrl(ex1_alu_ctrl_1), .ex1_funct3(ex1_funct3_1), .ex1_csr_idx(ex1_csr_idx_1),
+        .ex1_CsrWen(ex1_CsrWen_1), .ex1_CsrImmSel(ex1_CsrImmSel_1),
+        .ex1_IsEcall(ex1_IsEcall_1), .ex1_IsEbreak(ex1_IsEbreak_1), .ex1_IsMret(ex1_IsMret_1),
+        .ex1_CsrOp(ex1_CsrOp_1), .ex1_pred_taken(ex1_pred_taken_1), .ex1_pred_target(ex1_pred_tgt_1)
+    );
+
+    assign ex1_rs1_0 = ex1_inst_0[19:15]; assign ex1_rs2_0 = ex1_inst_0[24:20];
+    assign ex1_rs1_1 = ex1_inst_1[19:15]; assign ex1_rs2_1 = ex1_inst_1[24:20];
+
+    // Forwarding for inst0 (from BR/MEM1/MEM2/WB — same as single-issue)
+    logic [2:0] fwd_A_0, fwd_B_0;
+    ForwardingUnit fw_0 (
+        .id_rs1(ex1_rs1_0), .id_rs2(ex1_rs2_0),
+        .ex_RegWen(br_valid_0 & br_RegWen_0), .ex_rd(br_rd_0),
+        .mem1_RegWen(mem1_valid_0 & mem1_RegWen_0), .mem1_rd(mem1_rd_0),
+        .mem2_RegWen(mem2_valid_0 & mem2_RegWen_0), .mem2_rd(mem2_rd_0),
+        .wb_RegWen(wb_valid_0 & wb_RegWen_0), .wb_rd(wb_rd_0),
+        .id_forward_A(fwd_A_0), .id_forward_B(fwd_B_0)
+    );
+
+    // Forwarding for inst1 (from BR/MEM1/MEM2/WB, same stages)
+    logic [2:0] fwd_A_1, fwd_B_1;
+    ForwardingUnit fw_1 (
+        .id_rs1(ex1_rs1_1), .id_rs2(ex1_rs2_1),
+        .ex_RegWen(br_valid_0 & br_RegWen_0), .ex_rd(br_rd_0),
+        .mem1_RegWen(mem1_valid_0 & mem1_RegWen_0), .mem1_rd(mem1_rd_0),
+        .mem2_RegWen(mem2_valid_0 & mem2_RegWen_0), .mem2_rd(mem2_rd_0),
+        .wb_RegWen(wb_valid_0 & wb_RegWen_0), .wb_rd(wb_rd_0),
+        .id_forward_A(fwd_A_1), .id_forward_B(fwd_B_1)
+    );
+
+    // Inter-instruction forward: inst0 ALU result → inst1 operand (combinational)
+    logic [31:0] ex1_alu_res_0, ex1_alu_res_1;
+    wire inst0_to_inst1_A = ex1_valid_0 && ex1_RegWen_0 && (ex1_rd_0 != 5'd0) && (ex1_rd_0 == ex1_rs1_1);
+    wire inst0_to_inst1_B = ex1_valid_0 && ex1_RegWen_0 && (ex1_rd_0 != 5'd0) && (ex1_rd_0 == ex1_rs2_1);
+
+    logic [31:0] ex1_fwd_0_A, ex1_fwd_0_B, ex1_fwd_1_A, ex1_fwd_1_B;
     always_comb begin
-        case(real_ex_forward_A)
-            3'b100: ex1_fw_rs1_data = br_fw_data;
-            3'b011: ex1_fw_rs1_data = mem1_fw_data;
-            3'b010: ex1_fw_rs1_data = mem2_fw_data;
-            3'b001: ex1_fw_rs1_data = wb_data;
-            default: ex1_fw_rs1_data = ex1_rs1_data_raw;
-        endcase
-        case(real_ex_forward_B)
-            3'b100: ex1_fw_rs2_data = br_fw_data;
-            3'b011: ex1_fw_rs2_data = mem1_fw_data;
-            3'b010: ex1_fw_rs2_data = mem2_fw_data;
-            3'b001: ex1_fw_rs2_data = wb_data;
-            default: ex1_fw_rs2_data = ex1_rs2_data_raw;
-        endcase
+        case(fwd_A_0) 3'b100: ex1_fwd_0_A = br_fw_data_0; 3'b011: ex1_fwd_0_A = mem1_fw_data_0;
+            3'b010: ex1_fwd_0_A = mem2_fw_data_0; 3'b001: ex1_fwd_0_A = wb_data_0; default: ex1_fwd_0_A = ex1_rs1_raw_0; endcase
+        case(fwd_B_0) 3'b100: ex1_fwd_0_B = br_fw_data_0; 3'b011: ex1_fwd_0_B = mem1_fw_data_0;
+            3'b010: ex1_fwd_0_B = mem2_fw_data_0; 3'b001: ex1_fwd_0_B = wb_data_0; default: ex1_fwd_0_B = ex1_rs2_raw_0; endcase
+        // inst1 forwarding: inter-inst (inst0 ALU) has highest priority
+        case(fwd_A_1) 3'b100: ex1_fwd_1_A = br_fw_data_0; 3'b011: ex1_fwd_1_A = mem1_fw_data_0;
+            3'b010: ex1_fwd_1_A = mem2_fw_data_0; 3'b001: ex1_fwd_1_A = wb_data_0; default: ex1_fwd_1_A = ex1_rs1_raw_1; endcase
+        case(fwd_B_1) 3'b100: ex1_fwd_1_B = br_fw_data_0; 3'b011: ex1_fwd_1_B = mem1_fw_data_0;
+            3'b010: ex1_fwd_1_B = mem2_fw_data_0; 3'b001: ex1_fwd_1_B = wb_data_0; default: ex1_fwd_1_B = ex1_rs2_raw_1; endcase
     end
+    wire [31:0] inst1_rs1_final = inst0_to_inst1_A ? ex1_alu_res_0 : ex1_fwd_1_A;
+    wire [31:0] inst1_rs2_final = inst0_to_inst1_B ? ex1_alu_res_0 : ex1_fwd_1_B;
 
-    // ALU 与 MDU 运算单元逻辑
-    logic [31:0] ex1_alu_op1, ex1_alu_op2, ex1_alu_res, final_ex_alu_res;
-    assign ex1_alu_op1 = (ex1_AluSrcA == 2'b10) ? 32'b0 : (ex1_AluSrcA == 2'b01) ? ex1_pc : ex1_fw_rs1_data;
-    assign ex1_alu_op2 = ex1_AluSrcB ? ex1_imm : ex1_fw_rs2_data;
+    // Dual ALU
+    wire [31:0] ex1_op1_0 = (ex1_AluSrcA_0 == 2'b10) ? 32'b0 : (ex1_AluSrcA_0 == 2'b01) ? ex1_pc_0 : ex1_fwd_0_A;
+    wire [31:0] ex1_op2_0 = ex1_AluSrcB_0 ? ex1_imm_0 : ex1_fwd_0_B;
+    ALU #(DATAWIDTH) alu_0 (.A(ex1_op1_0), .B(ex1_op2_0), .ALUControl(ex1_alu_ctrl_0), .Result(ex1_alu_res_0));
 
-    ALU #(DATAWIDTH) alu_inst (.A(ex1_alu_op1), .B(ex1_alu_op2), .ALUControl(ex1_alu_ctrl), .Result(ex1_alu_res));
-    
-    logic [31:0] mdu_res; logic mdu_busy, mdu_done;
+    wire [31:0] ex1_op1_1 = (ex1_AluSrcA_1 == 2'b10) ? 32'b0 : (ex1_AluSrcA_1 == 2'b01) ? ex1_pc_1 : inst1_rs1_final;
+    wire [31:0] ex1_op2_1 = ex1_AluSrcB_1 ? ex1_imm_1 : inst1_rs2_final;
     logic mdu_start;
-    always_comb mdu_start = ex1_valid && ex1_is_M && !mdu_busy && !mdu_done;
-    always_comb stall_req_mdu = ex1_valid && ex1_is_M && !mdu_done;
-    
-    MDU mdu_inst (
-        .clk(cpu_clk), .rst(cpu_rst), .start(mdu_start), 
-        .funct3(ex1_funct3), .a(ex1_fw_rs1_data), .b(ex1_fw_rs2_data), 
-        .result(mdu_res), .busy(mdu_busy), .done(mdu_done)
-    );
-    
-    assign final_ex_alu_res = ex1_is_M ? mdu_res : ex1_alu_res;
+    ALU #(DATAWIDTH) alu_1 (.A(ex1_op1_1), .B(ex1_op2_1), .ALUControl(ex1_alu_ctrl_1), .Result(ex1_alu_res_1));
 
-    logic [31:0] ex1_agu_res;
-    AGU #(DATAWIDTH) agu_inst (.base(ex1_fw_rs1_data), .offset(ex1_imm), .addr(ex1_agu_res));
+    // MDU (仅 inst0)
+    logic [31:0] mdu_res; logic mdu_busy, mdu_done;
+    always_comb mdu_start = ex1_valid_0 && ex1_is_M_0 && !mdu_busy && !mdu_done;
+    always_comb stall_req_mdu = ex1_valid_0 && ex1_is_M_0 && !mdu_done;
+    MDU mdu_inst (.clk(cpu_clk), .rst(cpu_rst), .start(mdu_start),
+        .funct3(ex1_funct3_0), .a(ex1_fwd_0_A), .b(ex1_fwd_0_B),
+        .result(mdu_res), .busy(mdu_busy), .done(mdu_done));
+    wire [31:0] final_alu_0 = ex1_is_M_0 ? mdu_res : ex1_alu_res_0;
+
+    // AGU (仅 inst0)
+    wire [31:0] ex1_agu_res;
+    AGU #(DATAWIDTH) agu_inst (.base(ex1_fwd_0_A), .offset(ex1_imm_0), .addr(ex1_agu_res));
 
     // =========================================================================
-    // Stage 8: BR 级 (分支物理决断与 CSR 写)
+    // Stage 8: BR 级 (仅 inst0, inst1 不是分支)
     // =========================================================================
-    
-    logic br_valid, br_MemWen, br_IsBranch;
-    logic [31:0] br_inst, br_ret_pc, br_branch_target, br_alu_res, br_fw_rs1_data, br_fw_rs2_data, br_agu_res, br_csr_rdata, br_pred_target;
-    logic [1:0] br_JmpType, br_WbSel; logic [2:0] br_funct3; logic br_pred_taken;
+    logic br_valid_0, br_MemWen_0, br_IsBranch_0;
+    logic [31:0] br_inst_0, br_ret_pc_0, br_br_tgt_0, br_alu_res_0;
+    logic [31:0] br_fw_rs1_0, br_fw_rs2_0, br_agu_res_0, br_csr_rdata_0, br_pred_tgt_0;
+    logic [1:0] br_JmpType_0, br_WbSel_0; logic [2:0] br_funct3_0; logic br_pred_taken_0;
+    logic [4:0] br_rd_0; logic br_RegWen_0;
 
-    EX1_BR_Reg #(DATAWIDTH) ex1_br_reg (
+    EX1_BR_Reg #(DATAWIDTH) ex1_br_0 (
         .clk(cpu_clk), .rst(cpu_rst), .stall(1'b0), .poison(poison_BR),
-        .ex1_valid(ex1_valid), .ex1_pc(ex1_pc), .ex1_inst(ex1_inst), .ex1_ret_pc(ex1_ret_pc), .ex1_branch_target(ex1_branch_target),
-        .ex1_alu_res(final_ex_alu_res), .ex1_fw_rs1_data(ex1_fw_rs1_data), .ex1_fw_rs2_data(ex1_fw_rs2_data), .ex1_agu_res(ex1_agu_res),
-        .ex1_rd(ex1_rd), .ex1_RegWen(ex1_RegWen), .ex1_MemWen(ex1_MemWen), .ex1_IsBranch(ex1_IsBranch), .ex1_JmpType(ex1_JmpType), .ex1_WbSel(ex1_WbSel), .ex1_funct3(ex1_funct3),
-        .ex1_pred_taken(ex1_pred_taken), .ex1_pred_target(ex1_pred_target),
-        
-        .br_valid(br_valid), .br_pc(br_pc), .br_inst(br_inst), .br_ret_pc(br_ret_pc), .br_branch_target(br_branch_target),
-        .br_alu_res(br_alu_res), .br_fw_rs1_data(br_fw_rs1_data), .br_fw_rs2_data(br_fw_rs2_data), .br_agu_res(br_agu_res),
-        .br_rd(br_rd), .br_RegWen(br_RegWen), .br_MemWen(br_MemWen), .br_IsBranch(br_IsBranch), .br_JmpType(br_JmpType), .br_WbSel(br_WbSel), .br_funct3(br_funct3),
-        .br_pred_taken(br_pred_taken), .br_pred_target(br_pred_target)
+        .ex1_valid(ex1_valid_0), .ex1_pc(ex1_pc_0), .ex1_inst(ex1_inst_0),
+        .ex1_ret_pc(ex1_ret_pc_0), .ex1_branch_target(ex1_br_tgt_0),
+        .ex1_alu_res(final_alu_0), .ex1_fw_rs1_data(ex1_fwd_0_A),
+        .ex1_fw_rs2_data(ex1_fwd_0_B), .ex1_agu_res(ex1_agu_res),
+        .ex1_rd(ex1_rd_0), .ex1_RegWen(ex1_RegWen_0), .ex1_MemWen(ex1_MemWen_0),
+        .ex1_IsBranch(ex1_IsBranch_0), .ex1_JmpType(ex1_JmpType_0),
+        .ex1_WbSel(ex1_WbSel_0), .ex1_funct3(ex1_funct3_0),
+        .ex1_pred_taken(ex1_pred_taken_0), .ex1_pred_target(ex1_pred_tgt_0),
+        .br_valid(br_valid_0), .br_pc(br_pc), .br_inst(br_inst_0),
+        .br_ret_pc(br_ret_pc_0), .br_branch_target(br_br_tgt_0),
+        .br_alu_res(br_alu_res_0), .br_fw_rs1_data(br_fw_rs1_0),
+        .br_fw_rs2_data(br_fw_rs2_0), .br_agu_res(br_agu_res_0),
+        .br_rd(br_rd_0), .br_RegWen(br_RegWen_0), .br_MemWen(br_MemWen_0),
+        .br_IsBranch(br_IsBranch_0), .br_JmpType(br_JmpType_0),
+        .br_WbSel(br_WbSel_0), .br_funct3(br_funct3_0),
+        .br_pred_taken(br_pred_taken_0), .br_pred_target(br_pred_tgt_0)
     );
 
-    // 分支比对信号已在前端 F1 阶段预先声明，此处直接赋值
-    assign br_is_jump_or_branch = br_IsBranch || (br_JmpType != 2'b00);
+    wire br_is_ctrl = br_IsBranch_0 || (br_JmpType_0 != 2'b00);
+    assign br_valid_out  = br_valid_0;
+    assign br_target_out = br_br_tgt_0;
 
-    assign br_valid_out  = br_valid;
-    assign br_target_out = br_branch_target;
+    BranchUnit #(DATAWIDTH) bu_inst (.imm(32'b0),
+        .rs1_data(br_fw_rs1_0), .rs2_data(br_fw_rs2_0),
+        .precalc_branch_target(br_br_tgt_0), .precalc_pc_plus_4(br_ret_pc_0),
+        .trap_pc(trap_pc), .Branch(br_IsBranch_0), .Jump(br_JmpType_0),
+        .funct3(br_funct3_0), .next_pc(br_actual_target), .actual_taken(br_actual_taken));
 
-    // 🌟 修正项：已移除悬空的 pc_plus_4 端口
-    BranchUnit #(DATAWIDTH) bu_inst (
-        .imm(32'b0), .rs1_data(br_fw_rs1_data), .rs2_data(br_fw_rs2_data),
-        .precalc_branch_target(br_branch_target), .precalc_pc_plus_4(br_ret_pc),
-        .trap_pc(trap_pc), .Branch(br_IsBranch), .Jump(br_JmpType), .funct3(br_funct3),
-        .next_pc(br_actual_target), .actual_taken(br_actual_taken) 
-    );
-    
-    // 分支比对纠错逻辑
-    logic target_mismatch, branch_mispredict, target_mispredict;
+    logic tgt_mismatch, br_misp, tgt_misp;
     always_comb begin
-        if (br_JmpType == 2'b10) target_mismatch = (br_actual_target != br_pred_target);
-        else if (br_JmpType == 2'b11) target_mismatch = (br_pred_target != trap_pc);
-        else target_mismatch = (br_pred_target != br_branch_target);
+        if (br_JmpType_0 == 2'b10) tgt_mismatch = (br_actual_target != br_pred_tgt_0);
+        else if (br_JmpType_0 == 2'b11) tgt_mismatch = (br_pred_tgt_0 != trap_pc);
+        else tgt_mismatch = (br_pred_tgt_0 != br_br_tgt_0);
     end
-    assign branch_mispredict = br_actual_taken ^ br_pred_taken;
-    assign target_mispredict = br_actual_taken & br_pred_taken & target_mismatch;
-    assign br_mispredict = br_valid & ((br_is_jump_or_branch & (branch_mispredict | target_mispredict)) | (~br_is_jump_or_branch & br_pred_taken));
+    assign br_misp = br_actual_taken ^ br_pred_taken_0;
+    assign tgt_misp = br_actual_taken & br_pred_taken_0 & tgt_mismatch;
+    assign br_mispredict = br_valid_0 & ((br_is_ctrl & (br_misp | tgt_misp)) | (~br_is_ctrl & br_pred_taken_0));
 
-    // CSR 解析与状态更新逻辑
-    logic br_IsEcall, br_IsEbreak, br_IsMret, br_CsrWen, br_CsrImmSel; 
-    logic [11:0] br_csr_idx; 
-    logic [1:0] br_CsrOp;
-    
-    assign br_IsEcall = br_inst[6:0] == 7'b1110011 && br_inst[31:20] == 12'h000;
-    assign br_IsEbreak = br_inst[6:0] == 7'b1110011 && br_inst[31:20] == 12'h001;
-    assign br_IsMret = br_inst[6:0] == 7'b1110011 && br_inst[31:20] == 12'h302;
-    assign br_CsrWen = br_inst[6:0] == 7'b1110011 && br_inst[14:12] != 3'b000;
-    assign br_CsrImmSel = br_inst[14];
-    assign br_CsrOp = {br_inst[13:12] == 2'b11, br_inst[13:12] == 2'b10};
-    assign br_csr_idx = br_inst[31:20];
+    // CSR (仅 inst0)
+    wire br_IsEcall  = br_inst_0[6:0] == 7'b1110011 && br_inst_0[31:20] == 12'h000;
+    wire br_IsEbreak = br_inst_0[6:0] == 7'b1110011 && br_inst_0[31:20] == 12'h001;
+    wire br_IsMret   = br_inst_0[6:0] == 7'b1110011 && br_inst_0[31:20] == 12'h302;
+    wire br_CsrWen   = br_inst_0[6:0] == 7'b1110011 && br_inst_0[14:12] != 3'b000;
+    wire br_CsrImmSel= br_inst_0[14];
+    wire [1:0] br_CsrOp = {br_inst_0[13:12] == 2'b11, br_inst_0[13:12] == 2'b10};
+    wire [11:0] br_csr_idx = br_inst_0[31:20];
+    wire [31:0] br_csr_wdata = br_CsrImmSel ? {27'b0, br_inst_0[19:15]} : br_fw_rs1_0;
+    wire br_actual_csr_wen = br_valid_0 && br_CsrWen && !((br_CsrOp != 2'b00) && (br_inst_0[19:15] == 5'b0));
+    assign br_take_trap = br_valid_0 & (br_IsEcall | br_IsEbreak | br_IsMret);
 
-    logic [31:0] br_csr_wdata;
-    assign br_csr_wdata = br_CsrImmSel ? {27'b0, br_inst[19:15]} : br_fw_rs1_data;
-    wire  br_actual_csr_wen = br_valid && br_CsrWen && !((br_CsrOp != 2'b00) && (br_inst[19:15] == 5'b0));
-    assign br_take_trap = br_valid & (br_IsEcall | br_IsEbreak | br_IsMret);
-
-    CSR #(DATAWIDTH) csr_inst (
-        .clk(cpu_clk), .rst(cpu_rst), .pc(br_pc),
+    CSR #(DATAWIDTH) csr_inst (.clk(cpu_clk), .rst(cpu_rst), .pc(br_pc),
         .csr_idx(br_csr_idx), .wdata(br_csr_wdata), .csr_op(br_CsrOp), .csr_wen(br_actual_csr_wen),
-        .ecall(br_valid & br_IsEcall), .ebreak(br_valid & br_IsEbreak), .mret(br_valid & br_IsMret),
-        .rdata(br_csr_rdata), .trap_pc(trap_pc)
-    );
-    assign br_fw_data = (br_WbSel == 2'b01) ? br_ret_pc : (br_WbSel == 2'b11) ? br_csr_rdata : br_alu_res;
+        .ecall(br_valid_0 & br_IsEcall), .ebreak(br_valid_0 & br_IsEbreak), .mret(br_valid_0 & br_IsMret),
+        .rdata(br_csr_rdata_0), .trap_pc(trap_pc));
+    wire [31:0] br_fw_data_0 = (br_WbSel_0 == 2'b01) ? br_ret_pc_0 : (br_WbSel_0 == 2'b11) ? br_csr_rdata_0 : br_alu_res_0;
 
     // =========================================================================
-    // Stage 9, 10, 11: MEM1, MEM2, WB 物理级联
+    // MEM1-MEM2-WB (单路: 仅 inst0 访存, inst1 直接透传 ALU 结果)
     // =========================================================================
-    
-    logic mem1_valid, mem1_MemWen; 
-    logic [31:0] mem1_pc, mem1_inst, mem1_ret_pc, mem1_alu_res, mem1_fw_rs2_data, mem1_agu_res, mem1_csr_rdata; 
-    logic [1:0] mem1_WbSel; 
-    logic [2:0] mem1_funct3;
-    
-    BR_MEM1_Reg #(DATAWIDTH) br_mem1_reg (
-        .clk(cpu_clk), .rst(cpu_rst), .stall(1'b0), .poison(1'b0),
-        .br_valid(br_valid), .br_pc(br_pc), .br_inst(br_inst), .br_ret_pc(br_ret_pc), .br_alu_res(br_alu_res), .br_fw_rs2_data(br_fw_rs2_data), .br_agu_res(br_agu_res), .br_csr_rdata(br_csr_rdata), .br_rd(br_rd), .br_RegWen(br_RegWen), .br_MemWen(br_MemWen), .br_WbSel(br_WbSel), .br_funct3(br_funct3),
-        .mem1_valid(mem1_valid), .mem1_pc(mem1_pc), .mem1_inst(mem1_inst), .mem1_ret_pc(mem1_ret_pc), .mem1_alu_res(mem1_alu_res), .mem1_fw_rs2_data(mem1_fw_rs2_data), .mem1_agu_res(mem1_agu_res), .mem1_csr_rdata(mem1_csr_rdata), .mem1_rd(mem1_rd), .mem1_RegWen(mem1_RegWen), .mem1_MemWen(mem1_MemWen), .mem1_WbSel(mem1_WbSel), .mem1_funct3(mem1_funct3)
-    );
-    
-    assign perip_addr = mem1_agu_res;
-    assign perip_wen  = mem1_valid & mem1_MemWen;
-    
-    StoreAlign #(DATAWIDTH) store_align_inst (
-        .addr_offset(mem1_agu_res[1:0]), .wdata_in(mem1_fw_rs2_data), .size_mask(mem1_funct3[1:0]), 
-        .MemWrite(mem1_valid & mem1_MemWen), .wmask_out(perip_mask), .wdata_out(perip_wdata)
-    );
-    
-    // MEM1 级旁路网络的数据合并
-    assign mem1_fw_data = (mem1_WbSel == 2'b01) ? mem1_ret_pc : (mem1_WbSel == 2'b11) ? mem1_csr_rdata : mem1_alu_res;
+    logic mem1_valid_0, mem1_MemWen_0;
+    logic [31:0] mem1_pc_0, mem1_inst_0, mem1_ret_pc_0, mem1_alu_res_0;
+    logic [31:0] mem1_fw_rs2_0, mem1_agu_res_0, mem1_csr_rdata_0;
+    logic [1:0] mem1_WbSel_0; logic [2:0] mem1_funct3_0;
+    logic [4:0] mem1_rd_0; logic mem1_RegWen_0;
 
-    logic mem2_valid; 
-    logic [31:0] mem2_pc, mem2_inst, mem2_ret_pc, mem2_alu_res, mem2_agu_res, mem2_csr_rdata; 
-    logic [1:0] mem2_WbSel; 
-    logic [2:0] mem2_funct3;
-    
-    MEM1_MEM2_Reg #(DATAWIDTH) mem1_mem2_reg (
+    BR_MEM1_Reg #(DATAWIDTH) br_mem1_0 (
         .clk(cpu_clk), .rst(cpu_rst), .stall(1'b0), .poison(1'b0),
-        .mem1_valid(mem1_valid), .mem1_pc(mem1_pc), .mem1_inst(mem1_inst), .mem1_ret_pc(mem1_ret_pc), .mem1_alu_res(mem1_alu_res), .mem1_agu_res(mem1_agu_res), .mem1_csr_rdata(mem1_csr_rdata), .mem1_rd(mem1_rd), .mem1_RegWen(mem1_RegWen), .mem1_WbSel(mem1_WbSel), .mem1_funct3(mem1_funct3),
-        .mem2_valid(mem2_valid), .mem2_pc(mem2_pc), .mem2_inst(mem2_inst), .mem2_ret_pc(mem2_ret_pc), .mem2_alu_res(mem2_alu_res), .mem2_agu_res(mem2_agu_res), .mem2_csr_rdata(mem2_csr_rdata), .mem2_rd(mem2_rd), .mem2_RegWen(mem2_RegWen), .mem2_WbSel(mem2_WbSel), .mem2_funct3(mem2_funct3)
+        .br_valid(br_valid_0), .br_pc(br_pc), .br_inst(br_inst_0),
+        .br_ret_pc(br_ret_pc_0), .br_alu_res(br_alu_res_0),
+        .br_fw_rs2_data(br_fw_rs2_0), .br_agu_res(br_agu_res_0),
+        .br_csr_rdata(br_csr_rdata_0), .br_rd(br_rd_0),
+        .br_RegWen(br_RegWen_0), .br_MemWen(br_MemWen_0), .br_WbSel(br_WbSel_0),
+        .br_funct3(br_funct3_0),
+        .mem1_valid(mem1_valid_0), .mem1_pc(mem1_pc_0), .mem1_inst(mem1_inst_0),
+        .mem1_ret_pc(mem1_ret_pc_0), .mem1_alu_res(mem1_alu_res_0),
+        .mem1_fw_rs2_data(mem1_fw_rs2_0), .mem1_agu_res(mem1_agu_res_0),
+        .mem1_csr_rdata(mem1_csr_rdata_0), .mem1_rd(mem1_rd_0),
+        .mem1_RegWen(mem1_RegWen_0), .mem1_MemWen(mem1_MemWen_0),
+        .mem1_WbSel(mem1_WbSel_0), .mem1_funct3(mem1_funct3_0)
     );
-    
-    logic [31:0] mem2_non_load_data;
-    assign mem2_non_load_data = (mem2_WbSel == 2'b01) ? mem2_ret_pc : (mem2_WbSel == 2'b11) ? mem2_csr_rdata : mem2_alu_res;
-    assign mem2_fw_data = (mem2_WbSel == 2'b10) ? perip_rdata : mem2_non_load_data;
+    assign perip_addr = mem1_agu_res_0;
+    assign perip_wen  = mem1_valid_0 & mem1_MemWen_0;
+    StoreAlign #(DATAWIDTH) sa (.addr_offset(mem1_agu_res_0[1:0]), .wdata_in(mem1_fw_rs2_0),
+        .size_mask(mem1_funct3_0[1:0]), .MemWrite(mem1_valid_0 & mem1_MemWen_0),
+        .wmask_out(perip_mask), .wdata_out(perip_wdata));
+    wire [31:0] mem1_fw_data_0 = (mem1_WbSel_0 == 2'b01) ? mem1_ret_pc_0 :
+        (mem1_WbSel_0 == 2'b11) ? mem1_csr_rdata_0 : mem1_alu_res_0;
 
-    logic wb_valid; 
-    logic [31:0] wb_pc, wb_inst, wb_non_load_data, wb_perip_rdata; 
-    logic [1:0] wb_agu_res_1_0, wb_WbSel; 
-    logic [2:0] wb_funct3;
-    
-    MEM2_WB_Reg #(DATAWIDTH) mem2_wb_reg (
+    // MEM2
+    logic mem2_valid_0;
+    logic [31:0] mem2_pc_0, mem2_inst_0, mem2_ret_pc_0, mem2_alu_res_0, mem2_agu_res_0, mem2_csr_rdata_0;
+    logic [1:0] mem2_WbSel_0; logic [2:0] mem2_funct3_0;
+    logic [4:0] mem2_rd_0; logic mem2_RegWen_0;
+
+    MEM1_MEM2_Reg #(DATAWIDTH) mem1_mem2_0 (
         .clk(cpu_clk), .rst(cpu_rst), .stall(1'b0), .poison(1'b0),
-        .mem2_valid(mem2_valid), .mem2_pc(mem2_pc), .mem2_inst(mem2_inst), .mem2_non_load_data(mem2_non_load_data), .mem2_perip_rdata(perip_rdata), .mem2_agu_res_1_0(mem2_agu_res[1:0]), .mem2_funct3(mem2_funct3), .mem2_WbSel(mem2_WbSel), .mem2_rd(mem2_rd), .mem2_RegWen(mem2_RegWen),
-        .wb_valid(wb_valid), .wb_pc(wb_pc), .wb_inst(wb_inst), .wb_non_load_data(wb_non_load_data), .wb_perip_rdata(wb_perip_rdata), .wb_agu_res_1_0(wb_agu_res_1_0), .wb_funct3(wb_funct3), .wb_WbSel(wb_WbSel), .wb_rd(wb_rd), .wb_RegWen(wb_RegWen)
+        .mem1_valid(mem1_valid_0), .mem1_pc(mem1_pc_0), .mem1_inst(mem1_inst_0),
+        .mem1_ret_pc(mem1_ret_pc_0), .mem1_alu_res(mem1_alu_res_0),
+        .mem1_agu_res(mem1_agu_res_0), .mem1_csr_rdata(mem1_csr_rdata_0),
+        .mem1_rd(mem1_rd_0), .mem1_RegWen(mem1_RegWen_0), .mem1_WbSel(mem1_WbSel_0),
+        .mem1_funct3(mem1_funct3_0),
+        .mem2_valid(mem2_valid_0), .mem2_pc(mem2_pc_0), .mem2_inst(mem2_inst_0),
+        .mem2_ret_pc(mem2_ret_pc_0), .mem2_alu_res(mem2_alu_res_0),
+        .mem2_agu_res(mem2_agu_res_0), .mem2_csr_rdata(mem2_csr_rdata_0),
+        .mem2_rd(mem2_rd_0), .mem2_RegWen(mem2_RegWen_0), .mem2_WbSel(mem2_WbSel_0),
+        .mem2_funct3(mem2_funct3_0)
+    );
+    wire [31:0] mem2_nd_0 = (mem2_WbSel_0 == 2'b01) ? mem2_ret_pc_0 :
+        (mem2_WbSel_0 == 2'b11) ? mem2_csr_rdata_0 : mem2_alu_res_0;
+    wire [31:0] mem2_fw_data_0 = (mem2_WbSel_0 == 2'b10) ? perip_rdata : mem2_nd_0;
+
+    // WB inst0
+    logic wb_valid_0; logic [31:0] wb_pc_0, wb_inst_0, wb_nd_0, wb_prdata_0;
+    logic [1:0] wb_agu_lo_0, wb_WbSel_0; logic [2:0] wb_funct3_0;
+    MEM2_WB_Reg #(DATAWIDTH) mem2_wb_0 (
+        .clk(cpu_clk), .rst(cpu_rst), .stall(1'b0), .poison(1'b0),
+        .mem2_valid(mem2_valid_0), .mem2_pc(mem2_pc_0), .mem2_inst(mem2_inst_0),
+        .mem2_non_load_data(mem2_nd_0), .mem2_perip_rdata(perip_rdata),
+        .mem2_agu_res_1_0(mem2_agu_res_0[1:0]), .mem2_funct3(mem2_funct3_0),
+        .mem2_WbSel(mem2_WbSel_0), .mem2_rd(mem2_rd_0), .mem2_RegWen(mem2_RegWen_0),
+        .wb_valid(wb_valid_0), .wb_pc(wb_pc_0), .wb_inst(wb_inst_0),
+        .wb_non_load_data(wb_nd_0), .wb_perip_rdata(wb_prdata_0),
+        .wb_agu_res_1_0(wb_agu_lo_0), .wb_funct3(wb_funct3_0),
+        .wb_WbSel(wb_WbSel_0), .wb_rd(wb_rd_0), .wb_RegWen(wb_RegWen_0)
     );
 
-    // 组合逻辑写入对齐 (纯净的 Load 字节提取与扩展)
-    logic [7:0] wb_byte_data; 
-    logic [15:0] wb_half_data; 
-    logic [31:0] wb_rdata_ext;
-    
-    always_comb begin
-        case(wb_agu_res_1_0)
-            2'b00: wb_byte_data = wb_perip_rdata[ 7: 0]; 
-            2'b01: wb_byte_data = wb_perip_rdata[15: 8];
-            2'b10: wb_byte_data = wb_perip_rdata[23:16]; 
-            2'b11: wb_byte_data = wb_perip_rdata[31:24];
-        endcase
-        wb_half_data = wb_agu_res_1_0[1] ? wb_perip_rdata[31:16] : wb_perip_rdata[15:0];
-        case (wb_funct3)
-            3'b000: wb_rdata_ext = {{24{wb_byte_data[7]}}, wb_byte_data}; 
-            3'b100: wb_rdata_ext = {24'b0, wb_byte_data};
-            3'b001: wb_rdata_ext = {{16{wb_half_data[15]}}, wb_half_data}; 
-            3'b101: wb_rdata_ext = {16'b0, wb_half_data};
-            default: wb_rdata_ext = wb_perip_rdata;
-        endcase
+    // WB inst1: 简化为组合直通 (inst1 仅 ALU, 不经 MEM)
+    // inst1 从 EX1 ALU 结果直接写入, 不打 MEM 拍 (与 inst0 同步到达 WB)
+    // 使用移位寄存器延迟 inst1 的 ALU 结果 3 拍 (BR→MEM1→MEM2→WB)
+    logic [31:0] inst1_wb_d1, inst1_wb_d2, inst1_wb_data;
+    logic [31:0] inst1_wb_pc_d1, inst1_wb_pc_d2, wb_pc_1;
+    logic [4:0]  inst1_wb_rd_d1, inst1_wb_rd_d2, inst1_wb_rd;
+    logic        inst1_wb_rw_d1, inst1_wb_rw_d2, inst1_wb_RegWen;
+    logic        inst1_wb_v_d1, inst1_wb_v_d2, wb_valid_1;
+    always_ff @(posedge cpu_clk) begin
+        if (cpu_rst) begin
+            inst1_wb_v_d1 <= 0; inst1_wb_v_d2 <= 0; wb_valid_1 <= 0;
+        end else begin
+            inst1_wb_v_d1 <= ex1_valid_1 & ex1_RegWen_1; inst1_wb_v_d2 <= inst1_wb_v_d1; wb_valid_1 <= inst1_wb_v_d2;
+            inst1_wb_d1 <= ex1_alu_res_1; inst1_wb_d2 <= inst1_wb_d1; inst1_wb_data <= inst1_wb_d2;
+            inst1_wb_pc_d1 <= ex1_pc_1; inst1_wb_pc_d2 <= inst1_wb_pc_d1; wb_pc_1 <= inst1_wb_pc_d2;
+            inst1_wb_rd_d1 <= ex1_rd_1; inst1_wb_rd_d2 <= inst1_wb_rd_d1; inst1_wb_rd <= inst1_wb_rd_d2;
+            inst1_wb_rw_d1 <= ex1_RegWen_1; inst1_wb_rw_d2 <= inst1_wb_rw_d1; inst1_wb_RegWen <= inst1_wb_rw_d2;
+        end
     end
-    assign wb_data = (wb_WbSel == 2'b10) ? wb_rdata_ext : wb_non_load_data;
+    assign wb_data_1 = inst1_wb_data;
+    assign wb_RegWen_1 = inst1_wb_RegWen;
+    assign wb_rd_1   = inst1_wb_rd;
+
+    // WB byte alignment (仅 inst0 loads)
+    logic [7:0] wb_byte; logic [15:0] wb_half; logic [31:0] wb_ext;
+    always_comb begin
+        case(wb_agu_lo_0) 2'b00: wb_byte = wb_prdata_0[ 7: 0]; 2'b01: wb_byte = wb_prdata_0[15: 8];
+            2'b10: wb_byte = wb_prdata_0[23:16]; 2'b11: wb_byte = wb_prdata_0[31:24]; endcase
+        wb_half = wb_agu_lo_0[1] ? wb_prdata_0[31:16] : wb_prdata_0[15:0];
+        case(wb_funct3_0) 3'b000: wb_ext = {{24{wb_byte[7]}}, wb_byte}; 3'b100: wb_ext = {24'b0, wb_byte};
+            3'b001: wb_ext = {{16{wb_half[15]}}, wb_half}; 3'b101: wb_ext = {16'b0, wb_half}; default: wb_ext = wb_prdata_0; endcase
+    end
+    assign wb_data_0 = (wb_WbSel_0 == 2'b10) ? wb_ext : wb_nd_0;
 
     // =========================================================================
-    // 危险检测与时序阻断网 (Hazard Detection Unit)
+    // Hazard Detection (仅 inst0, 因为 inst1 仅在无依赖时发射)
     // =========================================================================
-    
-    // 🌟 修正项：阻断毒药指令发起的非必要流水线挂起请求
     HazardDetectionUnit hd_inst (
-        .id_rs1(rf_rs1), .id_rs2(rf_rs2), .id_opcode(rf_inst[6:0]),
-        .ex_RegWen(ex1_valid & ex1_RegWen), .ex_WbSel(ex1_WbSel), .ex_rd(ex1_rd),
-        .mem1_RegWen(br_valid & br_RegWen), .mem1_WbSel(br_WbSel), .mem1_rd(br_rd),
-        .ls_RegWen(mem1_valid & mem1_RegWen), .ls_WbSel(mem1_WbSel), .ls_rd(mem1_rd),
+        .id_rs1(rf_rs1_0), .id_rs2(rf_rs2_0), .id_opcode(rf_inst_0[6:0]),
+        .ex_RegWen(ex1_valid_0 & ex1_RegWen_0), .ex_WbSel(ex1_WbSel_0), .ex_rd(ex1_rd_0),
+        .mem1_RegWen(br_valid_0 & br_RegWen_0), .mem1_WbSel(br_WbSel_0), .mem1_rd(br_rd_0),
+        .ls_RegWen(mem1_valid_0 & mem1_RegWen_0), .ls_WbSel(mem1_WbSel_0), .ls_rd(mem1_rd_0),
         .stall_ID(hd_stall_RF), .flush_ID_EX(hd_flush_RF_EX1)
     );
 
     // =========================================================================
-    // 🌟 DiffTest 指令提交与 CSR 影子同步网络
+    // DiffTest + CSR Shadow (adapted for dual-issue, inst0 only)
     // =========================================================================
 `ifdef NPC_TEST
     import "DPI-C" context function void set_csr_scope();
-
-    // 计算 BR 阶段新写值
     logic [31:0] br_next_csr_val;
     always_comb begin
-        case(br_CsrOp)
-            2'b00: br_next_csr_val = br_csr_wdata;
-            2'b01: br_next_csr_val = br_csr_rdata | br_csr_wdata;
-            2'b10: br_next_csr_val = br_csr_rdata & ~br_csr_wdata;
-            default: br_next_csr_val = br_csr_wdata;
-        endcase
+        case(br_CsrOp) 2'b00: br_next_csr_val = br_csr_wdata;
+            2'b01: br_next_csr_val = br_csr_rdata_0 | br_csr_wdata;
+            2'b10: br_next_csr_val = br_csr_rdata_0 & ~br_csr_wdata;
+            default: br_next_csr_val = br_csr_wdata; endcase
     end
-
-    // 专供 DiffTest 的旁路延迟管线 (Shadow Pipeline)
-    logic        mem1_csr_wen_diff, mem2_csr_wen_diff, wb_csr_wen_diff;
-    logic [11:0] mem1_csr_idx_diff, mem2_csr_idx_diff, wb_csr_idx_diff;
-    logic [31:0] mem1_csr_val_diff, mem2_csr_val_diff, wb_csr_val_diff;
-    logic        mem1_ecall_diff,   mem2_ecall_diff,   wb_ecall_diff;
-    logic        mem1_ebreak_diff,  mem2_ebreak_diff,  wb_ebreak_diff;
-    logic        mem1_mret_diff,    mem2_mret_diff,    wb_mret_diff;
-    
+    logic mem1_csr_wen_d, mem2_csr_wen_d, wb_csr_wen_d;
+    logic [11:0] mem1_csr_idx_d, mem2_csr_idx_d, wb_csr_idx_d;
+    logic [31:0] mem1_csr_val_d, mem2_csr_val_d, wb_csr_val_d;
+    logic mem1_ecall_d, mem2_ecall_d, wb_ecall_d;
+    logic mem1_ebreak_d, mem2_ebreak_d, wb_ebreak_d;
+    logic mem1_mret_d, mem2_mret_d, wb_mret_d;
     always_ff @(posedge cpu_clk) begin
         if (cpu_rst) begin
-            mem1_csr_wen_diff <= 0; mem2_csr_wen_diff <= 0; wb_csr_wen_diff <= 0;
-            mem1_ecall_diff   <= 0; mem2_ecall_diff   <= 0; wb_ecall_diff   <= 0;
-            mem1_ebreak_diff  <= 0; mem2_ebreak_diff  <= 0; wb_ebreak_diff  <= 0;
-            mem1_mret_diff    <= 0; mem2_mret_diff    <= 0; wb_mret_diff    <= 0;
+            mem1_csr_wen_d <= 0; mem2_csr_wen_d <= 0; wb_csr_wen_d <= 0;
+            mem1_ecall_d <= 0; mem2_ecall_d <= 0; wb_ecall_d <= 0;
+            mem1_ebreak_d <= 0; mem2_ebreak_d <= 0; wb_ebreak_d <= 0;
+            mem1_mret_d <= 0; mem2_mret_d <= 0; wb_mret_d <= 0;
         end else begin
-            // 🌟 BR -> MEM1 
-            mem1_csr_wen_diff <= br_valid & br_actual_csr_wen;
-            mem1_ecall_diff   <= br_valid & br_IsEcall;
-            mem1_ebreak_diff  <= br_valid & br_IsEbreak;
-            mem1_mret_diff    <= br_valid & br_IsMret;
-            mem1_csr_idx_diff <= br_csr_idx;
-            mem1_csr_val_diff <= br_next_csr_val;
-
-            // 🌟 MEM1 -> MEM2
-            mem2_csr_wen_diff <= mem1_csr_wen_diff;
-            mem2_csr_idx_diff <= mem1_csr_idx_diff;
-            mem2_csr_val_diff <= mem1_csr_val_diff;
-            mem2_ecall_diff   <= mem1_ecall_diff;
-            mem2_ebreak_diff  <= mem1_ebreak_diff;
-            mem2_mret_diff    <= mem1_mret_diff;
-
-            // 🌟 MEM2 -> WB
-            wb_csr_wen_diff   <= mem2_csr_wen_diff;
-            wb_csr_idx_diff   <= mem2_csr_idx_diff;
-            wb_csr_val_diff   <= mem2_csr_val_diff;
-            wb_ecall_diff     <= mem2_ecall_diff;
-            wb_ebreak_diff    <= mem2_ebreak_diff;
-            wb_mret_diff      <= mem2_mret_diff;
+            mem1_csr_wen_d <= br_valid_0 & br_actual_csr_wen;
+            mem1_ecall_d <= br_valid_0 & br_IsEcall; mem1_ebreak_d <= br_valid_0 & br_IsEbreak;
+            mem1_mret_d <= br_valid_0 & br_IsMret;
+            mem1_csr_idx_d <= br_csr_idx; mem1_csr_val_d <= br_next_csr_val;
+            mem2_csr_wen_d <= mem1_csr_wen_d; mem2_csr_idx_d <= mem1_csr_idx_d;
+            mem2_csr_val_d <= mem1_csr_val_d; mem2_ecall_d <= mem1_ecall_d;
+            mem2_ebreak_d <= mem1_ebreak_d; mem2_mret_d <= mem1_mret_d;
+            wb_csr_wen_d <= mem2_csr_wen_d; wb_csr_idx_d <= mem2_csr_idx_d;
+            wb_csr_val_d <= mem2_csr_val_d; wb_ecall_d <= mem2_ecall_d;
+            wb_ebreak_d <= mem2_ebreak_d; wb_mret_d <= mem2_mret_d;
         end
     end
-
-    // DiffTest 专属影子 CSR 寄存器，由 WB 级统一结算
-    logic [31:0] diff_mstatus = 32'h1800;
-    logic [31:0] diff_mtvec   = 32'h0;
-    logic [31:0] diff_mscratch= 32'h0;
-    logic [31:0] diff_mepc    = 32'h0;
-    logic [31:0] diff_mcause  = 32'h0;
-
+    logic [31:0] dm_mstatus = 32'h1800, dm_mtvec = 0, dm_mscratch = 0, dm_mepc = 0, dm_mcause = 0;
     always_ff @(posedge cpu_clk) begin
-        if (cpu_rst) begin
-            diff_mstatus <= 32'h1800;
-            diff_mtvec   <= 32'h0;
-            diff_mscratch <= 32'h0;
-            diff_mepc    <= 32'h0;
-            diff_mcause  <= 32'h0;
-        end else begin
-            if (wb_ecall_diff) begin
-                diff_mepc    <= wb_pc;
-                diff_mcause  <= 32'h0000_000B;
-                diff_mstatus <= {diff_mstatus[31:13], 2'b11, diff_mstatus[10:8], diff_mstatus[3], diff_mstatus[6:4], 1'b0, diff_mstatus[2:0]};
-            end else if (wb_ebreak_diff) begin
-                diff_mepc    <= wb_pc;
-                diff_mcause  <= 32'h0000_0003;
-                diff_mstatus <= {diff_mstatus[31:13], 2'b11, diff_mstatus[10:8], diff_mstatus[3], diff_mstatus[6:4], 1'b0, diff_mstatus[2:0]};
-            end else if (wb_mret_diff) begin
-                diff_mstatus <= {diff_mstatus[31:13], 2'b00, diff_mstatus[10:8], 1'b1, diff_mstatus[6:4], diff_mstatus[7], diff_mstatus[2:0]};
-            end else if (wb_csr_wen_diff) begin
-                case(wb_csr_idx_diff)
-                    12'h300: diff_mstatus <= wb_csr_val_diff;
-                    12'h305: diff_mtvec   <= wb_csr_val_diff;
-                    12'h340: diff_mscratch <= wb_csr_val_diff;
-                    12'h341: diff_mepc    <= wb_csr_val_diff;
-                    12'h342: diff_mcause  <= wb_csr_val_diff;
-                    default: ;
-                endcase
-            end
+        if (cpu_rst) begin dm_mstatus <= 32'h1800; dm_mtvec <= 0; dm_mscratch <= 0; dm_mepc <= 0; dm_mcause <= 0; end
+        else if (wb_ecall_d) begin dm_mepc <= wb_pc_0; dm_mcause <= 32'hB;
+            dm_mstatus <= {dm_mstatus[31:13], 2'b11, dm_mstatus[10:8], dm_mstatus[3], dm_mstatus[6:4], 1'b0, dm_mstatus[2:0]}; end
+        else if (wb_ebreak_d) begin dm_mepc <= wb_pc_0; dm_mcause <= 32'h3;
+            dm_mstatus <= {dm_mstatus[31:13], 2'b11, dm_mstatus[10:8], dm_mstatus[3], dm_mstatus[6:4], 1'b0, dm_mstatus[2:0]}; end
+        else if (wb_mret_d) dm_mstatus <= {dm_mstatus[31:13], 2'b00, dm_mstatus[10:8], 1'b1, dm_mstatus[6:4], dm_mstatus[7], dm_mstatus[2:0]};
+        else if (wb_csr_wen_d) begin
+            case(wb_csr_idx_d) 12'h300: dm_mstatus <= wb_csr_val_d; 12'h305: dm_mtvec <= wb_csr_val_d;
+                12'h340: dm_mscratch <= wb_csr_val_d; 12'h341: dm_mepc <= wb_csr_val_d;
+                12'h342: dm_mcause <= wb_csr_val_d; default: ; endcase
         end
     end
-
     export "DPI-C" function get_csr;
     function int get_csr(input int idx);
-        case(idx)
-            32'h300: return diff_mstatus;
-            32'h305: return diff_mtvec;
-            32'h340: return diff_mscratch;
-            32'h341: return diff_mepc;
-            32'h342: return diff_mcause;
-            default: return 0;
-        endcase
+        case(idx) 32'h300: return dm_mstatus; 32'h305: return dm_mtvec; 32'h340: return dm_mscratch;
+            32'h341: return dm_mepc; 32'h342: return dm_mcause; default: return 0; endcase
     endfunction
-
-    initial begin
-        set_csr_scope();
-    end
+    initial set_csr_scope();
 
     // =========================================================================
-    // 性能计数器 (Performance Monitor) — 仅仿真
+    // Performance counters (dual-issue aware)
     // =========================================================================
-    logic [31:0] perf_commits;
-    logic [31:0] perf_branches;
-    logic [31:0] perf_mispredicts;
-    logic [31:0] perf_early_flushes;
-    logic [31:0] perf_micro_flushes;
-    logic [31:0] perf_br_flushes;
-    logic [31:0] perf_stall_frontend;
-    logic [31:0] perf_stall_backend;
-
-    // F5 级控制流指令检测 (复用 F2 预译码逻辑)
-    wire f5_is_ctrl_0 = (f5_inst_0[6:0] == 7'b1100011) | (f5_inst_0[6:0] == 7'b1101111) | (f5_inst_0[6:0] == 7'b1100111);
-    wire f5_is_ctrl_1 = (f5_inst_1[6:0] == 7'b1100011) | (f5_inst_1[6:0] == 7'b1101111) | (f5_inst_1[6:0] == 7'b1100111);
-
+    logic [31:0] pf_commits, pf_branches, pf_mispredicts, pf_early, pf_micro, pf_br, pf_stall_f, pf_stall_b, pf_dual;
+    wire f5_is_c0 = (f5_inst_0[6:0] == 7'b1100011) | (f5_inst_0[6:0] == 7'b1101111) | (f5_inst_0[6:0] == 7'b1100111);
+    wire f5_is_c1 = (f5_inst_1[6:0] == 7'b1100011) | (f5_inst_1[6:0] == 7'b1101111) | (f5_inst_1[6:0] == 7'b1100111);
     always_ff @(posedge cpu_clk) begin
-        if (cpu_rst) begin
-            perf_commits        <= 0;
-            perf_branches       <= 0;
-            perf_mispredicts    <= 0;
-            perf_early_flushes  <= 0;
-            perf_micro_flushes  <= 0;
-            perf_br_flushes     <= 0;
-            perf_stall_frontend <= 0;
-            perf_stall_backend  <= 0;
-        end else begin
-            if (wb_valid)                                      perf_commits        <= perf_commits        + 1;
-            if (f5_valid & (f5_is_ctrl_0 | f5_is_ctrl_1))     perf_branches       <= perf_branches       + 1;
-            if (br_mispredict)                                 perf_mispredicts    <= perf_mispredicts    + 1;
-            if (early_flush)                                   perf_early_flushes  <= perf_early_flushes  + 1;
-            if (f5_micro_flush)                                perf_micro_flushes  <= perf_micro_flushes  + 1;
-            if (br_flush)                                      perf_br_flushes     <= perf_br_flushes     + 1;
-            if (stall_frontend)                                perf_stall_frontend <= perf_stall_frontend + 1;
-            if (stall_RF)                                      perf_stall_backend  <= perf_stall_backend  + 1;
+        if (cpu_rst) begin pf_commits<=0; pf_branches<=0; pf_mispredicts<=0; pf_early<=0; pf_micro<=0; pf_br<=0; pf_stall_f<=0; pf_stall_b<=0; pf_dual<=0; end
+        else begin
+            if (wb_valid_0 | wb_valid_1) pf_commits <= pf_commits + 1;  // count dual-issue commits as 2
+            if (wb_valid_0 & wb_valid_1) pf_dual <= pf_dual + 1;
+            if (f5_valid & (f5_is_c0 | f5_is_c1)) pf_branches <= pf_branches + 1;
+            if (br_mispredict) pf_mispredicts <= pf_mispredicts + 1;
+            if (early_flush) pf_early <= pf_early + 1;
+            if (f5_micro_flush) pf_micro <= pf_micro + 1;
+            if (br_flush) pf_br <= pf_br + 1;
+            if (stall_frontend) pf_stall_f <= pf_stall_f + 1;
+            if (stall_RF) pf_stall_b <= pf_stall_b + 1;
         end
     end
-
-    // DPI-C 导出: 供 main.cpp 在 dead_loop 时读取
     export "DPI-C" function perf_get_counters;
     function void perf_get_counters(
         output int commits, output int branches, output int mispredicts,
-        output int early_flushes, output int micro_flushes, output int br_flushes,
-        output int stall_front, output int stall_back
+        output int early_f, output int micro_f, output int br_f,
+        output int stall_f, output int stall_b, output int dual_issues
     );
-        commits       = perf_commits;
-        branches      = perf_branches;
-        mispredicts   = perf_mispredicts;
-        early_flushes = perf_early_flushes;
-        micro_flushes = perf_micro_flushes;
-        br_flushes    = perf_br_flushes;
-        stall_front   = perf_stall_frontend;
-        stall_back    = perf_stall_backend;
+        commits=pf_commits; branches=pf_branches; mispredicts=pf_mispredicts;
+        early_f=pf_early; micro_f=pf_micro; br_f=pf_br;
+        stall_f=pf_stall_f; stall_b=pf_stall_b; dual_issues=pf_dual;
     endfunction
 `endif
 
