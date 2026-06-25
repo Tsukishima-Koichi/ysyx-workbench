@@ -818,6 +818,57 @@ module myCPU (
     initial begin
         set_csr_scope();
     end
+
+    // =========================================================================
+    // 性能计数器 (Performance Monitor) — 仅仿真
+    // =========================================================================
+    logic [31:0] perf_commits;
+    logic [31:0] perf_branches;
+    logic [31:0] perf_mispredicts;
+    logic [31:0] perf_micro_flushes;
+    logic [31:0] perf_br_flushes;
+    logic [31:0] perf_stall_frontend;
+    logic [31:0] perf_stall_backend;
+
+    // F5 级控制流指令检测 (复用 F2 预译码逻辑)
+    wire f5_is_ctrl_0 = (f5_inst_0[6:0] == 7'b1100011) | (f5_inst_0[6:0] == 7'b1101111) | (f5_inst_0[6:0] == 7'b1100111);
+    wire f5_is_ctrl_1 = (f5_inst_1[6:0] == 7'b1100011) | (f5_inst_1[6:0] == 7'b1101111) | (f5_inst_1[6:0] == 7'b1100111);
+
+    always_ff @(posedge cpu_clk) begin
+        if (cpu_rst) begin
+            perf_commits        <= 0;
+            perf_branches       <= 0;
+            perf_mispredicts    <= 0;
+            perf_micro_flushes  <= 0;
+            perf_br_flushes     <= 0;
+            perf_stall_frontend <= 0;
+            perf_stall_backend  <= 0;
+        end else begin
+            if (wb_valid)                                      perf_commits        <= perf_commits        + 1;
+            if (f5_valid & (f5_is_ctrl_0 | f5_is_ctrl_1))     perf_branches       <= perf_branches       + 1;
+            if (br_mispredict)                                 perf_mispredicts    <= perf_mispredicts    + 1;
+            if (f5_micro_flush)                                perf_micro_flushes  <= perf_micro_flushes  + 1;
+            if (br_flush)                                      perf_br_flushes     <= perf_br_flushes     + 1;
+            if (stall_frontend)                                perf_stall_frontend <= perf_stall_frontend + 1;
+            if (stall_RF)                                      perf_stall_backend  <= perf_stall_backend  + 1;
+        end
+    end
+
+    // DPI-C 导出: 供 main.cpp 在 dead_loop 时读取
+    export "DPI-C" function perf_get_counters;
+    function void perf_get_counters(
+        output int commits, output int branches, output int mispredicts,
+        output int micro_flushes, output int br_flushes,
+        output int stall_front, output int stall_back
+    );
+        commits       = perf_commits;
+        branches      = perf_branches;
+        mispredicts   = perf_mispredicts;
+        micro_flushes = perf_micro_flushes;
+        br_flushes    = perf_br_flushes;
+        stall_front   = perf_stall_frontend;
+        stall_back    = perf_stall_backend;
+    endfunction
 `endif
 
 endmodule
