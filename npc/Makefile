@@ -18,7 +18,11 @@ $(shell mkdir -p $(BUILD_DIR))
 # ============================================================================
 
 # 自动递归搜索 vsrc 目录下所有的 .v (Verilog) 和 .sv (SystemVerilog) 源文件
-VSRCS = $(shell find $(abspath ./vsrc) -name "*.v" -or -name "*.sv")
+ALL_VSRCS = $(shell find $(abspath ./vsrc) -name "*.v" -or -name "*.sv")
+# 单发射: 排除双发射专用文件
+VSRCS = $(filter-out %/cpu_dual.sv %/myCPU_Dual.sv %/RF_Dual.sv %/InstructionQueue_Dual.sv, $(ALL_VSRCS))
+# 双发射: 排除单发射专用文件
+DUAL_VSRCS = $(filter-out %/cpu.sv %/myCPU.sv %/RF.sv %/InstructionQueue.sv, $(ALL_VSRCS))
 
 # 自动递归搜索 csrc 目录下所有的 C/C++ 测试平台源文件
 CSRCS = $(shell find $(abspath ./csrc) -name "*.c" -or -name "*.cc" -or -name "*.cpp")
@@ -121,7 +125,6 @@ sim: $(BIN)
 # 双发射构建目标
 DUAL_TOP = cpu_dual
 DUAL_BIN = $(BUILD_DIR)/$(DUAL_TOP)
-DUAL_VSRCS = $(filter-out %/cpu.sv %/myCPU.sv %/RF.sv %/InstructionQueue.sv, $(VSRCS))
 $(DUAL_BIN): $(DUAL_VSRCS) $(CSRCS)
 	@echo "====== 1. Verilating and Compiling (Dual-Issue) ======"
 	$(VERILATOR) $(VERILATOR_CFLAGS) -CFLAGS "-DDUAL_ISSUE" \
