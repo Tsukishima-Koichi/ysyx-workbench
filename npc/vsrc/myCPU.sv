@@ -91,12 +91,13 @@ module myCPU (
     assign br_flush       = br_take_trap | br_mispredict;
     
     // 分布式拦截拓扑关系映射
-    assign poison_F1_F4   = br_flush | f5_micro_flush;
+    // early_flush: RF 级提前解析, 冲刷 F1→ID (比 BR 级提前 2 拍)
+    assign poison_F1_F4   = br_flush | f5_micro_flush | early_flush;
     assign poison_F5      = br_flush;
-    assign poison_IQ      = br_flush;
-    assign poison_ID      = br_flush;
+    assign poison_IQ      = br_flush | early_flush;
+    assign poison_ID      = br_flush | early_flush;
     assign poison_RF      = br_flush;
-    assign poison_EX1     = br_flush | hd_flush_RF_EX1; // 分支失败或数据冒险时就地截断并转化为 NOP 气泡
+    assign poison_EX1     = br_flush | hd_flush_RF_EX1;
     assign poison_BR      = stall_EX1 | br_flush;
     // 后端乘除法阻塞或发生全局冲刷时，就地截断并转化为 NOP 气泡，彻底防止 EX1 阶段的推测性指令逃逸至 BR
 
@@ -113,9 +114,10 @@ module myCPU (
     assign f1_pc_1 = f1_pc_0 + 4;       // 双字对齐的次路取指地址生成
     assign irom_addr = f1_pc_0;         // 绑定 I-ROM 物理驱动总线
 
-    // 🌟 PC 选择器 (NLP 快径 + TAGE/NLP-aware 微冲刷)
+    // 🌟 PC 选择器 (NLP 快径 + TAGE/NLP-aware 微冲刷 + RF 提前解析)
     assign actual_next_pc = br_take_trap   ? trap_pc :
                             br_mispredict  ? br_actual_target :
+                            early_flush    ? early_flush_target :
                             f5_micro_flush ? f5_micro_target :
                             stall_frontend ? f1_pc_0 :
                             nlp_hit        ? nlp_target :
@@ -456,6 +458,78 @@ module myCPU (
         .clk(cpu_clk), .rst(cpu_rst), .wen(wb_valid & wb_RegWen), .waddr(wb_rd), .wdata(wb_data),
         .rR1(rf_rs1), .rR2(rf_rs2), .rR1_data(rf_rs1_data_raw), .rR2_data(rf_rs2_data_raw)
     );
+
+    // =========================================================================
+    // RF 级提前分支解析 (Early Branch Resolution)
+    //
+    // 无 RAW 冒险时直接用 RF 原始数据做比较，比 BR 级提前 2 拍发出冲刷。
+    // 有 RAW 冒险 (rf_rs1/rs2 被前序指令写入中) 时退回 BR 级正常解析。
+    // JAL/JALR 无条件跳转无需比较，只检查 rs1 冒险 (JALR)。
+    // =========================================================================
+    wire rf_is_control = rf_IsBranch || (rf_JmpType != 2'b00);
+
+    // RAW 冒险检测: rf_rs1/rs2 是否有待写入的指令在流水线中
+    wire rs1_has_raw = (rf_rs1 != 5'b0) && (
+        (ex1_valid  & ex1_RegWen  & (ex1_rd  == rf_rs1)) |
+        (br_valid   & br_RegWen   & (br_rd   == rf_rs1)) |
+        (mem1_valid & mem1_RegWen & (mem1_rd == rf_rs1)) |
+        (mem2_valid & mem2_RegWen & (mem2_rd == rf_rs1)) |
+        (wb_valid   & wb_RegWen   & (wb_rd   == rf_rs1))
+    );
+    wire rs2_has_raw = (rf_rs2 != 5'b0) && (
+        (ex1_valid  & ex1_RegWen  & (ex1_rd  == rf_rs2)) |
+        (br_valid   & br_RegWen   & (br_rd   == rf_rs2)) |
+        (mem1_valid & mem1_RegWen & (mem1_rd == rf_rs2)) |
+        (mem2_valid & mem2_RegWen & (mem2_rd == rf_rs2)) |
+        (wb_valid   & wb_RegWen   & (wb_rd   == rf_rs2))
+    );
+    wire early_raw_hazard = rs1_has_raw | rs2_has_raw;
+
+    // 条件分支快速比较 (复用 BranchUnit 逻辑)
+    wire rf_is_equal  = (rf_rs1_data_raw == rf_rs2_data_raw);
+    wire rf_is_less_s = ($signed(rf_rs1_data_raw) < $signed(rf_rs2_data_raw));
+    wire rf_is_less_u = (rf_rs1_data_raw < rf_rs2_data_raw);
+    logic rf_take_branch;
+    always_comb begin
+        rf_take_branch = 1'b0;
+        if (rf_IsBranch) begin
+            case (rf_funct3)
+                3'b000: rf_take_branch = rf_is_equal;
+                3'b001: rf_take_branch = !rf_is_equal;
+                3'b100: rf_take_branch = rf_is_less_s;
+                3'b101: rf_take_branch = !rf_is_less_s;
+                3'b110: rf_take_branch = rf_is_less_u;
+                3'b111: rf_take_branch = !rf_is_less_u;
+                default: rf_take_branch = 1'b0;
+            endcase
+        end
+    end
+
+    // 真实方向: JAL/JALR 无条件 taken, 条件分支看比较结果
+    wire rf_actual_taken = (rf_JmpType == 2'b01) ? 1'b1 :       // JAL
+                           (rf_JmpType == 2'b10) ? 1'b1 :       // JALR (RAW 检查已覆盖 rs1)
+                           (rf_IsBranch) ? rf_take_branch : 1'b0;
+
+    // JALR 目标地址 (rf_rs1 + rf_imm, 最低位清零)
+    wire [31:0] rf_jalr_target = (rf_rs1_data_raw + rf_imm) & ~32'h1;
+    wire [31:0] early_target = (rf_JmpType == 2'b10) ? rf_jalr_target :
+                               (rf_actual_taken)     ? rf_branch_target :
+                                                       rf_ret_pc;
+
+    // 提前误判检测: 排除 ECALL/EBREAK/MRET (需要 CSR 处理)
+    wire early_mispredict = rf_valid & rf_is_control & ~early_raw_hazard &
+                            ~(rf_IsEcall | rf_IsEbreak | rf_IsMret) &
+                            (rf_actual_taken ^ rf_pred_taken);
+
+    // early_flush: 组合逻辑, 当拍检测当拍生效。打入一个脉冲寄存器防止
+    // stall_RF 期间连续触发 (连续毒化会导致 IQ 空转而无法推进分支自身)
+    logic early_done;
+    always_ff @(posedge cpu_clk) begin
+        if (cpu_rst || !rf_valid) early_done <= 1'b0;
+        else if (early_mispredict) early_done <= 1'b1;
+    end
+    (* max_fanout = "16" *) wire early_flush = early_mispredict & ~early_done;
+    wire [31:0] early_flush_target = early_target;
 
     // =========================================================================
     // Stage 7: EX1 级 (执行逻辑与前递闭环)
@@ -825,6 +899,7 @@ module myCPU (
     logic [31:0] perf_commits;
     logic [31:0] perf_branches;
     logic [31:0] perf_mispredicts;
+    logic [31:0] perf_early_flushes;
     logic [31:0] perf_micro_flushes;
     logic [31:0] perf_br_flushes;
     logic [31:0] perf_stall_frontend;
@@ -839,6 +914,7 @@ module myCPU (
             perf_commits        <= 0;
             perf_branches       <= 0;
             perf_mispredicts    <= 0;
+            perf_early_flushes  <= 0;
             perf_micro_flushes  <= 0;
             perf_br_flushes     <= 0;
             perf_stall_frontend <= 0;
@@ -847,6 +923,7 @@ module myCPU (
             if (wb_valid)                                      perf_commits        <= perf_commits        + 1;
             if (f5_valid & (f5_is_ctrl_0 | f5_is_ctrl_1))     perf_branches       <= perf_branches       + 1;
             if (br_mispredict)                                 perf_mispredicts    <= perf_mispredicts    + 1;
+            if (early_flush)                                   perf_early_flushes  <= perf_early_flushes  + 1;
             if (f5_micro_flush)                                perf_micro_flushes  <= perf_micro_flushes  + 1;
             if (br_flush)                                      perf_br_flushes     <= perf_br_flushes     + 1;
             if (stall_frontend)                                perf_stall_frontend <= perf_stall_frontend + 1;
@@ -858,12 +935,13 @@ module myCPU (
     export "DPI-C" function perf_get_counters;
     function void perf_get_counters(
         output int commits, output int branches, output int mispredicts,
-        output int micro_flushes, output int br_flushes,
+        output int early_flushes, output int micro_flushes, output int br_flushes,
         output int stall_front, output int stall_back
     );
         commits       = perf_commits;
         branches      = perf_branches;
         mispredicts   = perf_mispredicts;
+        early_flushes = perf_early_flushes;
         micro_flushes = perf_micro_flushes;
         br_flushes    = perf_br_flushes;
         stall_front   = perf_stall_frontend;

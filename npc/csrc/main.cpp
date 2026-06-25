@@ -7,10 +7,10 @@
 #include "monitor.h"
 #include "svdpi.h"
 
-// Performance counter DPI import (defined in myCPU.sv under `ifdef NPC_TEST)
+// Performance counter DPI import (defined in myCPU.sv under ifdef NPC_TEST)
 extern "C" void perf_get_counters(
     int* commits, int* branches, int* mispredicts,
-    int* micro_flushes, int* br_flushes,
+    int* early_flushes, int* micro_flushes, int* br_flushes,
     int* stall_front, int* stall_back
 );
 
@@ -86,11 +86,11 @@ int main(int argc, char** argv) {
             //  Performance Summary
             // ==========================================
             int p_commits, p_branches, p_mispredicts;
-            int p_micro_flushes, p_br_flushes;
+            int p_early_flushes, p_micro_flushes, p_br_flushes;
             int p_stall_front, p_stall_back;
             svSetScope(svGetScopeFromName("TOP.cpu.u_myCPU"));
             perf_get_counters(&p_commits, &p_branches, &p_mispredicts,
-                              &p_micro_flushes, &p_br_flushes,
+                              &p_early_flushes, &p_micro_flushes, &p_br_flushes,
                               &p_stall_front, &p_stall_back);
 
             printf("\n========== Performance Summary ==========\n");
@@ -101,8 +101,9 @@ int main(int argc, char** argv) {
                 printf("Branches Predicted:  %d\n", p_branches);
                 printf("Branch Mispredicts:  %d\n", p_mispredicts);
                 printf("Branch Accuracy:     %.2f%%\n", 100.0 * (p_branches - p_mispredicts) / p_branches);
-                printf("Micro-flushes:       %d (%.2f%% of branches)\n", p_micro_flushes, 100.0 * p_micro_flushes / p_branches);
-                printf("Global Flushes:      %d (%.2f%% of branches)\n", p_br_flushes, 100.0 * p_br_flushes / p_branches);
+                printf("Early RF Flushes:    %d (%.1f%% of mispredicts)\n", p_early_flushes, 100.0 * p_early_flushes / p_mispredicts);
+                printf("Micro-flushes:       %d\n", p_micro_flushes);
+                printf("Global BR Flushes:   %d\n", p_br_flushes);
             }
             if (cycles > 0) {
                 printf("Frontend Stall:      %d cyc (%.1f%%)\n", p_stall_front, 100.0 * p_stall_front / cycles);
