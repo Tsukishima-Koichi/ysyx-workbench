@@ -262,6 +262,12 @@
 
 ## 七、Vivado 同步状态
 
-TAGE 训练流水线已从 Vivado 工程同步 (S0→S1→S2 时序拆分)。EX1a/EX1b 拆分维持 Vivado 专属 (依赖 `perip_bridge` 的 DRAM 寄存器时序), 不同步至 Verilator 代码库。
+Verilator 与 Vivado 代码库保持完全一致。所有核心模块 (`myCPU.sv`, `TAGE.sv`, `NLP.sv`, `BranchPredictor.sv`, `HazardDetectionUnit.sv` 等) 均为同一版本。
 
-BRAM 输出寄存器 (DOA_REG) 当前关闭, BRAM 读延迟 1 拍, 与 Verilator 行为一致。
+已同步的 Vivado 时序优化:
+- TAGE 训练流水线 S0→S1→S2 拆分 (纯组合逻辑切分，不影响功能)
+
+未同步的 Vivado 改动:
+- EX1a/EX1b 拆分 — 改变了流水线深度 (16 级 vs 15 级)，破坏了 CSR/陷阱/MRET 指令的时序对齐。Vivado 侧也已回退。
+
+BRAM 输出寄存器 (DOA_REG) 当前关闭，BRAM 读延迟 1 拍。
