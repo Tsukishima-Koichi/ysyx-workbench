@@ -19,6 +19,13 @@ module RF_Dual #(
 );
     logic [DATAWIDTH-1:0] reg_bank [31:0];
 
+`ifdef NPC_TEST
+    export "DPI-C" function get_gpr;
+    function int get_gpr(input int idx);
+        return reg_bank[idx];
+    endfunction
+`endif
+
     always_ff @(posedge clk) begin
         if (rst) begin
             for (int i = 0; i < 32; i++) reg_bank[i] <= 0;

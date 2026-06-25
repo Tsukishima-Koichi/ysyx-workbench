@@ -1,18 +1,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "verilated.h"
+#ifdef DUAL_ISSUE
+#include "Vcpu_dual.h"
+#else
 #include "Vcpu.h"
+#endif
 #include "memory.h"
 #include "difftest.h"
 #include "monitor.h"
 #include "svdpi.h"
 
-// Performance counter DPI import (defined in myCPU.sv under ifdef NPC_TEST)
+// Performance counter DPI import
+#ifdef DUAL_ISSUE
+extern "C" void perf_get_counters_dual(
+    int* commits, int* branches, int* mispredicts,
+    int* early_flushes, int* micro_flushes, int* br_flushes,
+    int* stall_front, int* stall_back, int* dual_issues
+);
+#else
 extern "C" void perf_get_counters(
     int* commits, int* branches, int* mispredicts,
     int* early_flushes, int* micro_flushes, int* br_flushes,
     int* stall_front, int* stall_back
 );
+#endif
 
 // // 宏定义最好统一移到 Makefile，这里仅作演示保留
 // #define GEN_WAVEFORM 
@@ -26,7 +38,11 @@ extern "C" void perf_get_counters(
 int main(int argc, char** argv) {
     VerilatedContext* contextp = new VerilatedContext;
     contextp->commandArgs(argc, argv);
+#ifdef DUAL_ISSUE
+    Vcpu_dual* top = new Vcpu_dual{contextp};
+#else
     Vcpu* top = new Vcpu{contextp};
+#endif
 
     #ifdef GEN_WAVEFORM
     printf("Waveform generation enabled.\n");
@@ -87,16 +103,26 @@ int main(int argc, char** argv) {
             // ==========================================
             int p_commits, p_branches, p_mispredicts;
             int p_early_flushes, p_micro_flushes, p_br_flushes;
-            int p_stall_front, p_stall_back;
+            int p_stall_front, p_stall_back, p_dual = 0;
+            svSetScope(svGetScopeFromName("TOP.cpu_dual.u_myCPU"));
+#ifdef DUAL_ISSUE
+            perf_get_counters_dual(&p_commits, &p_branches, &p_mispredicts,
+                              &p_early_flushes, &p_micro_flushes, &p_br_flushes,
+                              &p_stall_front, &p_stall_back, &p_dual);
+#else
             svSetScope(svGetScopeFromName("TOP.cpu.u_myCPU"));
             perf_get_counters(&p_commits, &p_branches, &p_mispredicts,
                               &p_early_flushes, &p_micro_flushes, &p_br_flushes,
                               &p_stall_front, &p_stall_back);
+#endif
 
             printf("\n========== Performance Summary ==========\n");
             printf("Cycles:              %u\n", cycles);
             printf("Committed Insns:     %d\n", p_commits);
             if (cycles > 0) printf("IPC:                 %.4f\n", (float)p_commits / cycles);
+#ifdef DUAL_ISSUE
+            printf("Dual-Issue Cycles:   %d (%.1f%%)\n", p_dual, 100.0 * p_dual / (cycles > 0 ? cycles : 1));
+#endif
             if (p_branches > 0) {
                 printf("Branches Predicted:  %d\n", p_branches);
                 printf("Branch Mispredicts:  %d\n", p_mispredicts);

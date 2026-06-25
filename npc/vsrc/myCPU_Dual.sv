@@ -342,6 +342,31 @@ module myCPU_Dual (
 
 
     // =========================================================================
+    // =========================================================================
+    // 后端别名: 桥接前端已声明信号与后端 inst0 信号
+    // 这些信号在 F1-F5 段已声明, 此处 assign 连接而非重新声明
+    // =========================================================================
+    assign br_is_jump_or_branch = br_IsBranch_0 || (br_JmpType_0 != 2'b00);
+    // br_actual_target, br_actual_taken, br_pc 在前端已声明, 在 BR 段赋值
+    // br_valid, br_IsBranch, br_JmpType 的别名在各自的 assign/always 块中
+
+    // 前端 NLP 训练用的 BR 信号 (桥接到 inst0)
+    wire        br_valid    = br_valid_0;
+    wire        br_IsBranch = br_IsBranch_0;
+    wire [1:0]  br_JmpType  = br_JmpType_0;
+
+    // cpu_dual.sv 需要的信号 (ex1 from inst0)
+    wire ex1_valid          = ex1_valid_0;
+    wire ex1_IsEbreak       = ex1_IsEbreak_0;
+    wire [1:0] ex1_JmpType  = ex1_JmpType_0;
+    wire [31:0] ex1_pc      = ex1_pc_0;
+    wire [31:0] ex1_branch_target = ex1_br_tgt_0;
+    wire [31:0] id_inst     = id_inst_0;
+    // wb_valid, wb_pc for cpu_dual commit (inst0 only)
+    wire wb_valid = wb_valid_0;
+    wire [31:0] wb_pc = wb_pc_0;
+
+    // =========================================================================
     // 双发射指令队列 (InstructionQueue_Dual)
     // =========================================================================
     logic [1:0]  dual_pop_count;
@@ -677,6 +702,7 @@ module myCPU_Dual (
 
     wire [31:0] ex1_op1_1 = (ex1_AluSrcA_1 == 2'b10) ? 32'b0 : (ex1_AluSrcA_1 == 2'b01) ? ex1_pc_1 : inst1_rs1_final;
     wire [31:0] ex1_op2_1 = ex1_AluSrcB_1 ? ex1_imm_1 : inst1_rs2_final;
+    logic mdu_start;
     ALU #(DATAWIDTH) alu_1 (.A(ex1_op1_1), .B(ex1_op2_1), .ALUControl(ex1_alu_ctrl_1), .Result(ex1_alu_res_1));
 
     // MDU (仅 inst0)
@@ -847,6 +873,7 @@ module myCPU_Dual (
         end
     end
     assign wb_data_1 = inst1_wb_data;
+    assign wb_RegWen_1 = inst1_wb_RegWen;
     assign wb_rd_1   = inst1_wb_rd;
 
     // WB byte alignment (仅 inst0 loads)
@@ -870,5 +897,95 @@ module myCPU_Dual (
         .ls_RegWen(mem1_valid_0 & mem1_RegWen_0), .ls_WbSel(mem1_WbSel_0), .ls_rd(mem1_rd_0),
         .stall_ID(hd_stall_RF), .flush_ID_EX(hd_flush_RF_EX1)
     );
+
+    // =========================================================================
+    // DiffTest + CSR Shadow (adapted for dual-issue, inst0 only)
+    // =========================================================================
+`ifdef NPC_TEST
+    import "DPI-C" context function void set_csr_scope();
+    logic [31:0] br_next_csr_val;
+    always_comb begin
+        case(br_CsrOp) 2'b00: br_next_csr_val = br_csr_wdata;
+            2'b01: br_next_csr_val = br_csr_rdata_0 | br_csr_wdata;
+            2'b10: br_next_csr_val = br_csr_rdata_0 & ~br_csr_wdata;
+            default: br_next_csr_val = br_csr_wdata; endcase
+    end
+    logic mem1_csr_wen_d, mem2_csr_wen_d, wb_csr_wen_d;
+    logic [11:0] mem1_csr_idx_d, mem2_csr_idx_d, wb_csr_idx_d;
+    logic [31:0] mem1_csr_val_d, mem2_csr_val_d, wb_csr_val_d;
+    logic mem1_ecall_d, mem2_ecall_d, wb_ecall_d;
+    logic mem1_ebreak_d, mem2_ebreak_d, wb_ebreak_d;
+    logic mem1_mret_d, mem2_mret_d, wb_mret_d;
+    always_ff @(posedge cpu_clk) begin
+        if (cpu_rst) begin
+            mem1_csr_wen_d <= 0; mem2_csr_wen_d <= 0; wb_csr_wen_d <= 0;
+            mem1_ecall_d <= 0; mem2_ecall_d <= 0; wb_ecall_d <= 0;
+            mem1_ebreak_d <= 0; mem2_ebreak_d <= 0; wb_ebreak_d <= 0;
+            mem1_mret_d <= 0; mem2_mret_d <= 0; wb_mret_d <= 0;
+        end else begin
+            mem1_csr_wen_d <= br_valid_0 & br_actual_csr_wen;
+            mem1_ecall_d <= br_valid_0 & br_IsEcall; mem1_ebreak_d <= br_valid_0 & br_IsEbreak;
+            mem1_mret_d <= br_valid_0 & br_IsMret;
+            mem1_csr_idx_d <= br_csr_idx; mem1_csr_val_d <= br_next_csr_val;
+            mem2_csr_wen_d <= mem1_csr_wen_d; mem2_csr_idx_d <= mem1_csr_idx_d;
+            mem2_csr_val_d <= mem1_csr_val_d; mem2_ecall_d <= mem1_ecall_d;
+            mem2_ebreak_d <= mem1_ebreak_d; mem2_mret_d <= mem1_mret_d;
+            wb_csr_wen_d <= mem2_csr_wen_d; wb_csr_idx_d <= mem2_csr_idx_d;
+            wb_csr_val_d <= mem2_csr_val_d; wb_ecall_d <= mem2_ecall_d;
+            wb_ebreak_d <= mem2_ebreak_d; wb_mret_d <= mem2_mret_d;
+        end
+    end
+    logic [31:0] dm_mstatus = 32'h1800, dm_mtvec = 0, dm_mscratch = 0, dm_mepc = 0, dm_mcause = 0;
+    always_ff @(posedge cpu_clk) begin
+        if (cpu_rst) begin dm_mstatus <= 32'h1800; dm_mtvec <= 0; dm_mscratch <= 0; dm_mepc <= 0; dm_mcause <= 0; end
+        else if (wb_ecall_d) begin dm_mepc <= wb_pc_0; dm_mcause <= 32'hB;
+            dm_mstatus <= {dm_mstatus[31:13], 2'b11, dm_mstatus[10:8], dm_mstatus[3], dm_mstatus[6:4], 1'b0, dm_mstatus[2:0]}; end
+        else if (wb_ebreak_d) begin dm_mepc <= wb_pc_0; dm_mcause <= 32'h3;
+            dm_mstatus <= {dm_mstatus[31:13], 2'b11, dm_mstatus[10:8], dm_mstatus[3], dm_mstatus[6:4], 1'b0, dm_mstatus[2:0]}; end
+        else if (wb_mret_d) dm_mstatus <= {dm_mstatus[31:13], 2'b00, dm_mstatus[10:8], 1'b1, dm_mstatus[6:4], dm_mstatus[7], dm_mstatus[2:0]};
+        else if (wb_csr_wen_d) begin
+            case(wb_csr_idx_d) 12'h300: dm_mstatus <= wb_csr_val_d; 12'h305: dm_mtvec <= wb_csr_val_d;
+                12'h340: dm_mscratch <= wb_csr_val_d; 12'h341: dm_mepc <= wb_csr_val_d;
+                12'h342: dm_mcause <= wb_csr_val_d; default: ; endcase
+        end
+    end
+    export "DPI-C" function get_csr;
+    function int get_csr(input int idx);
+        case(idx) 32'h300: return dm_mstatus; 32'h305: return dm_mtvec; 32'h340: return dm_mscratch;
+            32'h341: return dm_mepc; 32'h342: return dm_mcause; default: return 0; endcase
+    endfunction
+    initial set_csr_scope();
+
+    // =========================================================================
+    // Performance counters (dual-issue aware)
+    // =========================================================================
+    logic [31:0] pf_commits, pf_branches, pf_mispredicts, pf_early, pf_micro, pf_br, pf_stall_f, pf_stall_b, pf_dual;
+    wire f5_is_c0 = (f5_inst_0[6:0] == 7'b1100011) | (f5_inst_0[6:0] == 7'b1101111) | (f5_inst_0[6:0] == 7'b1100111);
+    wire f5_is_c1 = (f5_inst_1[6:0] == 7'b1100011) | (f5_inst_1[6:0] == 7'b1101111) | (f5_inst_1[6:0] == 7'b1100111);
+    always_ff @(posedge cpu_clk) begin
+        if (cpu_rst) begin pf_commits<=0; pf_branches<=0; pf_mispredicts<=0; pf_early<=0; pf_micro<=0; pf_br<=0; pf_stall_f<=0; pf_stall_b<=0; pf_dual<=0; end
+        else begin
+            if (wb_valid_0 | wb_valid_1) pf_commits <= pf_commits + 1;  // count dual-issue commits as 2
+            if (wb_valid_0 & wb_valid_1) pf_dual <= pf_dual + 1;
+            if (f5_valid & (f5_is_c0 | f5_is_c1)) pf_branches <= pf_branches + 1;
+            if (br_mispredict) pf_mispredicts <= pf_mispredicts + 1;
+            if (early_flush) pf_early <= pf_early + 1;
+            if (f5_micro_flush) pf_micro <= pf_micro + 1;
+            if (br_flush) pf_br <= pf_br + 1;
+            if (stall_frontend) pf_stall_f <= pf_stall_f + 1;
+            if (stall_RF) pf_stall_b <= pf_stall_b + 1;
+        end
+    end
+    export "DPI-C" function perf_get_counters_dual;
+    function void perf_get_counters_dual(
+        output int commits, output int branches, output int mispredicts,
+        output int early_f, output int micro_f, output int br_f,
+        output int stall_f, output int stall_b, output int dual_issues
+    );
+        commits=pf_commits; branches=pf_branches; mispredicts=pf_mispredicts;
+        early_f=pf_early; micro_f=pf_micro; br_f=pf_br;
+        stall_f=pf_stall_f; stall_b=pf_stall_b; dual_issues=pf_dual;
+    endfunction
+`endif
 
 endmodule

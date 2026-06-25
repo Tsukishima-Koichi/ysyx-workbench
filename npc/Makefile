@@ -118,7 +118,21 @@ sim: $(BIN)
 # 5. 清理规则 (Clean)
 # ============================================================================
 # 声明伪目标，防止和同名文件冲突
-.PHONY: default sim clean run-all
+# 双发射构建目标
+DUAL_TOP = cpu_dual
+DUAL_BIN = $(BUILD_DIR)/$(DUAL_TOP)
+DUAL_VSRCS = $(filter-out %/cpu.sv %/myCPU.sv %/RF.sv %/InstructionQueue.sv, $(VSRCS))
+$(DUAL_BIN): $(DUAL_VSRCS) $(CSRCS)
+	@echo "====== 1. Verilating and Compiling (Dual-Issue) ======"
+	$(VERILATOR) $(VERILATOR_CFLAGS) -CFLAGS "-DDUAL_ISSUE" \
+		--top-module $(DUAL_TOP) $(DUAL_VSRCS) $(CSRCS) \
+		--Mdir $(OBJ_DIR)_dual --exe -o $(abspath $(DUAL_BIN))
+
+dual: $(DUAL_BIN)
+	@echo "====== 2. Running Dual-Issue Simulation ======"
+	$(DUAL_BIN) $(SIM_ARGS) $(ARGS) $(IMG)
+
+.PHONY: default sim clean run-all dual
 
 clean:
 	@echo "====== Cleaning Workspace ======"

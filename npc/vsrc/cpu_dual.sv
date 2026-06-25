@@ -5,7 +5,7 @@
 import "DPI-C" context function int pmem_read(input int raddr);
 import "DPI-C" context function void pmem_write(input int waddr, input int wdata, input byte wmask);
 
-module cpu(
+module cpu_dual(
     input logic clk,
     input logic rst,
 

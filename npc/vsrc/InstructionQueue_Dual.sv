@@ -47,7 +47,8 @@ module InstructionQueue_Dual #(
     assign pop_valid_1 = (count >= 2);
 
     wire [PTR_WIDTH-1:0] raddr0 = rptr[PTR_WIDTH-1:0];
-    wire [PTR_WIDTH-1:0] raddr1 = (rptr + 1) % DEPTH;
+    wire [PTR_WIDTH:0] rptr_plus_1 = rptr + 1;
+    wire [PTR_WIDTH-1:0] raddr1 = rptr_plus_1[PTR_WIDTH-1:0];
 
     assign pop_pc_0           = queue_pc[raddr0];
     assign pop_inst_0         = queue_inst[raddr0];
