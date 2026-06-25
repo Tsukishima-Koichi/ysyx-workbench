@@ -448,7 +448,8 @@ module myCPU (
     wire load_use_0_to_1 = (id_WbSel_0 == 2'b10) && id_RegWen_0 && (id_inst_0[11:7] != 5'd0) &&
         (((id_inst_1[19:15] != 5'd0) && (id_inst_0[11:7] == id_inst_1[19:15])) ||
          ((id_inst_1[24:20] != 5'd0) && (id_inst_0[11:7] == id_inst_1[24:20])));
-    wire can_dual = id_valid_1 && inst1_simple_alu && !waw_conflict && !load_use_0_to_1;
+    wire pc_adjacent = (id_pc_1 == id_pc_0 + 4);
+    wire can_dual = id_valid_1 && inst1_simple_alu && !waw_conflict && !load_use_0_to_1 && pc_adjacent;
     assign dual_pop_count = can_dual ? 2'd2 : (id_valid_0 ? 2'd1 : 2'd0);
 
     // =========================================================================
@@ -858,20 +859,20 @@ module myCPU (
     // WB inst1: 简化为组合直通 (inst1 仅 ALU, 不经 MEM)
     // inst1 从 EX1 ALU 结果直接写入, 不打 MEM 拍 (与 inst0 同步到达 WB)
     // 使用移位寄存器延迟 inst1 的 ALU 结果 3 拍 (BR→MEM1→MEM2→WB)
-    logic [31:0] inst1_wb_d1, inst1_wb_d2, inst1_wb_data;
-    logic [31:0] inst1_wb_pc_d1, inst1_wb_pc_d2, wb_pc_1;
-    logic [4:0]  inst1_wb_rd_d1, inst1_wb_rd_d2, inst1_wb_rd;
-    logic        inst1_wb_rw_d1, inst1_wb_rw_d2, inst1_wb_RegWen;
-    logic        inst1_wb_v_d1, inst1_wb_v_d2, wb_valid_1;
+    logic [31:0] inst1_wb_d1, inst1_wb_d2, inst1_wb_d3, inst1_wb_data;
+    logic [31:0] inst1_wb_pc_d1, inst1_wb_pc_d2, inst1_wb_pc_d3, wb_pc_1;
+    logic [4:0]  inst1_wb_rd_d1, inst1_wb_rd_d2, inst1_wb_rd_d3, inst1_wb_rd;
+    logic        inst1_wb_rw_d1, inst1_wb_rw_d2, inst1_wb_rw_d3, inst1_wb_RegWen;
+    logic        inst1_wb_v_d1, inst1_wb_v_d2, inst1_wb_v_d3, wb_valid_1;
     always_ff @(posedge cpu_clk) begin
         if (cpu_rst) begin
-            inst1_wb_v_d1 <= 0; inst1_wb_v_d2 <= 0; wb_valid_1 <= 0;
+            inst1_wb_v_d1 <= 0; inst1_wb_v_d2 <= 0; inst1_wb_v_d3 <= 0; wb_valid_1 <= 0;
         end else begin
-            inst1_wb_v_d1 <= ex1_valid_1 & ex1_RegWen_1; inst1_wb_v_d2 <= inst1_wb_v_d1; wb_valid_1 <= inst1_wb_v_d2;
-            inst1_wb_d1 <= ex1_alu_res_1; inst1_wb_d2 <= inst1_wb_d1; inst1_wb_data <= inst1_wb_d2;
-            inst1_wb_pc_d1 <= ex1_pc_1; inst1_wb_pc_d2 <= inst1_wb_pc_d1; wb_pc_1 <= inst1_wb_pc_d2;
-            inst1_wb_rd_d1 <= ex1_rd_1; inst1_wb_rd_d2 <= inst1_wb_rd_d1; inst1_wb_rd <= inst1_wb_rd_d2;
-            inst1_wb_rw_d1 <= ex1_RegWen_1; inst1_wb_rw_d2 <= inst1_wb_rw_d1; inst1_wb_RegWen <= inst1_wb_rw_d2;
+            inst1_wb_v_d1 <= ex1_valid_1 & ex1_RegWen_1; inst1_wb_v_d2 <= inst1_wb_v_d1; inst1_wb_v_d3 <= inst1_wb_v_d2; wb_valid_1 <= inst1_wb_v_d3;
+            inst1_wb_d1 <= ex1_alu_res_1; inst1_wb_d2 <= inst1_wb_d1; inst1_wb_d3 <= inst1_wb_d2; inst1_wb_data <= inst1_wb_d3;
+            inst1_wb_pc_d1 <= ex1_pc_1; inst1_wb_pc_d2 <= inst1_wb_pc_d1; inst1_wb_pc_d3 <= inst1_wb_pc_d2; wb_pc_1 <= inst1_wb_pc_d3;
+            inst1_wb_rd_d1 <= ex1_rd_1; inst1_wb_rd_d2 <= inst1_wb_rd_d1; inst1_wb_rd_d3 <= inst1_wb_rd_d2; inst1_wb_rd <= inst1_wb_rd_d3;
+            inst1_wb_rw_d1 <= ex1_RegWen_1; inst1_wb_rw_d2 <= inst1_wb_rw_d1; inst1_wb_rw_d3 <= inst1_wb_rw_d2; inst1_wb_RegWen <= inst1_wb_rw_d3;
         end
     end
     assign wb_data_1 = inst1_wb_data;
