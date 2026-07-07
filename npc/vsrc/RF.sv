@@ -1,9 +1,6 @@
 `timescale 1ns / 1ps
 `include "defines.sv"
 
-/**
- * 双发射寄存器文件 — 4 读端口 + 2 写端口
- */
 module RF #(
     parameter ADDR_WIDTH = 5,
     parameter DATAWIDTH  = 32
@@ -12,8 +9,8 @@ module RF #(
     input  logic                    wen0, wen1,
     input  logic [ADDR_WIDTH-1:0]   waddr0, waddr1,
     input  logic [DATAWIDTH-1:0]    wdata0, wdata1,
-    input  logic [ADDR_WIDTH-1:0]   rR1_0, rR2_0,  // inst0: rs1, rs2
-    input  logic [ADDR_WIDTH-1:0]   rR1_1, rR2_1,  // inst1: rs1, rs2
+    input  logic [ADDR_WIDTH-1:0]   rR1_0, rR2_0,
+    input  logic [ADDR_WIDTH-1:0]   rR1_1, rR2_1,
     output logic [DATAWIDTH-1:0]    rR1_0_data, rR2_0_data,
     output logic [DATAWIDTH-1:0]    rR1_1_data, rR2_1_data
 );
@@ -35,17 +32,20 @@ module RF #(
         end
     end
 
-    // 读端口 0 (inst0 rs1): wen0 优先, wen1 次之 (inst0 先写)
-    assign rR1_0_data = (wen0 && waddr0 != 5'd0 && waddr0 == rR1_0) ? wdata0 :
-                        (wen1 && waddr1 != 5'd0 && waddr1 == rR1_0) ? wdata1 :
-                        reg_bank[rR1_0];
-    assign rR2_0_data = (wen0 && waddr0 != 5'd0 && waddr0 == rR2_0) ? wdata0 :
-                        (wen1 && waddr1 != 5'd0 && waddr1 == rR2_0) ? wdata1 :
-                        reg_bank[rR2_0];
-    assign rR1_1_data = (wen0 && waddr0 != 5'd0 && waddr0 == rR1_1) ? wdata0 :
-                        (wen1 && waddr1 != 5'd0 && waddr1 == rR1_1) ? wdata1 :
-                        reg_bank[rR1_1];
-    assign rR2_1_data = (wen0 && waddr0 != 5'd0 && waddr0 == rR2_1) ? wdata0 :
-                        (wen1 && waddr1 != 5'd0 && waddr1 == rR2_1) ? wdata1 :
-                        reg_bank[rR2_1];
+    assign rR1_0_data = (rR1_0 == 5'd0) ? 32'd0 :
+        (wen0 && waddr0 != 5'd0 && waddr0 == rR1_0) ? wdata0 :
+        (wen1 && waddr1 != 5'd0 && waddr1 == rR1_0) ? wdata1 :
+        reg_bank[rR1_0];
+    assign rR2_0_data = (rR2_0 == 5'd0) ? 32'd0 :
+        (wen0 && waddr0 != 5'd0 && waddr0 == rR2_0) ? wdata0 :
+        (wen1 && waddr1 != 5'd0 && waddr1 == rR2_0) ? wdata1 :
+        reg_bank[rR2_0];
+    assign rR1_1_data = (rR1_1 == 5'd0) ? 32'd0 :
+        (wen0 && waddr0 != 5'd0 && waddr0 == rR1_1) ? wdata0 :
+        (wen1 && waddr1 != 5'd0 && waddr1 == rR1_1) ? wdata1 :
+        reg_bank[rR1_1];
+    assign rR2_1_data = (rR2_1 == 5'd0) ? 32'd0 :
+        (wen0 && waddr0 != 5'd0 && waddr0 == rR2_1) ? wdata0 :
+        (wen1 && waddr1 != 5'd0 && waddr1 == rR2_1) ? wdata1 :
+        reg_bank[rR2_1];
 endmodule

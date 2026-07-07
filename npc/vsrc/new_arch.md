@@ -8,9 +8,9 @@
         前端 F-Block (5 级)                  中端 D-Block            后端 E-Block (8 级)
 
   ┌──────────────────────────────────┐    ┌─────┐    ┌──────────────────────────────────────────┐
-  │ F1      F2       F3     F4   F5 │    │ IQ  │    │ ID  RF  EX1  BR  MEM1 MEM2  MEM3/WB    │
-  │ NLP  TAGE-H  BRAM-R  TAGE-M Ovr │───→│2W1R │───→│Dec Fwd ALU  Res  Req  Data Align/ WB  │
-  │ 0cy   Hash   Latch   Match  Arb │    │FIFO │    │         MDU            Byte  Commit    │
+  │ F1      F2       F3     F4   F5  │    │ IQ  │    │ ID  RF  EX1  BR  MEM1 MEM2  MEM3/WB      │
+  │ NLP  TAGE-H  BRAM-R  TAGE-M Ovr  │──→ │2W1R │──→ │Dec Fwd ALU  Res  Req  Data Align/ WB     │
+  │ 0cy   Hash   Latch   Match  Arb  │    │FIFO │    │         MDU            Byte  Commit      │
   └──────────────────────────────────┘    └─────┘    └──────────────────────────────────────────┘
        ↑                                   ↑                    ↑
        │  micro_flush (F5→F1-F4)           │  flush (hard reset) │  br_flush (global poison)

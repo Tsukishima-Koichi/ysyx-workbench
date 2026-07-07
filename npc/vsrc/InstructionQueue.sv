@@ -5,7 +5,7 @@
  * 后端每周期可弹出 1 或 2 条指令 (pop_count 指示消耗量)
  */
 module InstructionQueue #(
-    parameter DEPTH = 8,
+    parameter DEPTH = 32,
     parameter DATAWIDTH = 32
 )(
     input  logic clk, rst, flush,

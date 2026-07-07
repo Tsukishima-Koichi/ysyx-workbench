@@ -38,11 +38,11 @@ int main(int argc, char** argv) {
 
         // inst0 commit
         if (top->commit_valid) {
-            if (!difftest_commit(top->commit_pc)) goto sim_end;
+            if (!difftest_commit(top->commit_pc, 0)) goto sim_end;
         }
         // inst1 commit (dual-issue)
         if (top->commit_valid_1) {
-            if (!difftest_commit(top->commit_pc_1)) goto sim_end;
+            if (!difftest_commit(top->commit_pc_1, 1)) goto sim_end;
         }
 
         if (cycles % 1000000 == 0) {

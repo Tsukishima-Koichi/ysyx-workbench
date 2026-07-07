@@ -239,7 +239,7 @@ module EX1_BR_Reg #(parameter DATAWIDTH = 32)(
         else if (!stall)   br_valid <= ex1_valid;
     end
     always_ff @(posedge clk) begin
-        if (!stall) begin
+        if (!stall && !poison) begin
             {br_pc, br_inst, br_ret_pc, br_branch_target} <= {ex1_pc, ex1_inst, ex1_ret_pc, ex1_branch_target};
             // 剔除了对 csr_rdata 的赋值传递
             {br_alu_res, br_fw_rs1_data, br_fw_rs2_data, br_agu_res} <= 

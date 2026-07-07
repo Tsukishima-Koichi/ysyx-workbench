@@ -24,10 +24,10 @@ module ForwardingUnit(
         else                                                          id_forward_A = 3'b000;
         
         // Forward B
-        if      (ex_RegWen   && ex_rd   != 5'b0 && ex_rd   == id_rs2) id_forward_B = 3'b100;
-        else if (mem1_RegWen && mem1_rd != 5'b0 && mem1_rd == id_rs2) id_forward_B = 3'b011;
-        else if (mem2_RegWen && mem2_rd != 5'b0 && mem2_rd == id_rs2) id_forward_B = 3'b010;
-        else if (wb_RegWen   && wb_rd   != 5'b0 && wb_rd   == id_rs2) id_forward_B = 3'b001;
+        if      (id_rs2 != 5'd0 && ex_RegWen   && ex_rd   != 5'b0 && ex_rd   == id_rs2) id_forward_B = 3'b100;
+        else if (id_rs2 != 5'd0 && mem1_RegWen && mem1_rd != 5'b0 && mem1_rd == id_rs2) id_forward_B = 3'b011;
+        else if (id_rs2 != 5'd0 && mem2_RegWen && mem2_rd != 5'b0 && mem2_rd == id_rs2) id_forward_B = 3'b010;
+        else if (id_rs2 != 5'd0 && wb_RegWen   && wb_rd   != 5'b0 && wb_rd   == id_rs2) id_forward_B = 3'b001;
         else                                                          id_forward_B = 3'b000;
     end
 endmodule
