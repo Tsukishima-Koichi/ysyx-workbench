@@ -50,8 +50,10 @@ module myCPU (
     (* max_fanout = "16" *) logic f5_micro_flush;   // F5→F1-F4 微冲刷广播
     (* max_fanout = "16" *) logic br_flush;          // BR→全流水线致命冲刷广播
     logic br_take_trap;                 // 异常中断/环境调用 (Trap/Ecall/Mret) 状态跳转使能
-    logic br_mispredict;                // BR 级确认为真实分支预测失败 (Branch Misprediction)
-    logic hd_flush_RF_EX1;              // 因 加载-使用冒险 (Load-Use Hazard) 注入物理气泡的冲刷控制线
+    logic br_mispredict_0;              // inst0 分支预测失败
+    logic br_mispredict_1;              // inst1 分支预测失败 (Phase 4)
+    logic hd_flush_RF_EX1_0;            // inst0 加载-使用冒险冲刷
+    logic hd_flush_RF_EX1_1;            // inst1 加载-使用冒险冲刷
 
     // 分布式同步注毒网络 (Distributed Synchronization Poison Network)
     // 信号不接入触发器异步端，通过使能端与有效位（Valid Bit）强行改写为 1'b0 实现拦截
@@ -61,8 +63,10 @@ module myCPU (
     (* equivalent_register_removal = "no" *) logic poison_IQ;
     (* equivalent_register_removal = "no" *) logic poison_ID;
     (* equivalent_register_removal = "no" *) logic poison_RF;
-    (* equivalent_register_removal = "no" *) logic poison_EX1;
-    (* equivalent_register_removal = "no" *) logic poison_BR;
+    (* equivalent_register_removal = "no" *) logic poison_EX1_0;
+    (* equivalent_register_removal = "no" *) logic poison_EX1_1;
+    (* equivalent_register_removal = "no" *) logic poison_BR_0;
+    (* equivalent_register_removal = "no" *) logic poison_BR_1;
 
     // NLP (Next-Line Predictor) 信号
     logic        nlp_hit;
@@ -89,8 +93,14 @@ module myCPU (
     assign stall_ID       = stall_RF; 
     assign stall_IQ_pop   = stall_ID;
 
-    assign br_flush       = br_take_trap | br_mispredict;
-    
+    // Per-pipeline flush preparation (Phase 2: split signals, keep identical behavior)
+    // br_mispredict_0 assigned later (after BranchUnit)
+    assign br_mispredict_1 = 1'b0;  // Phase 4: add inst1 BranchUnit
+    // hd_flush_RF_EX1_0 driven by HDU instance below
+    assign hd_flush_RF_EX1_1 = hd_flush_RF_EX1_0;  // Same: load-use flushes both pipelines
+
+    assign br_flush       = br_take_trap | br_mispredict_0 | br_mispredict_1;
+
     // 分布式拦截拓扑关系映射
     // early_flush: RF 级提前解析, 冲刷 F1→ID (比 BR 级提前 2 拍)
     assign poison_F1_F4   = br_flush | f5_micro_flush;
@@ -98,8 +108,10 @@ module myCPU (
     assign poison_IQ      = br_flush;
     assign poison_ID      = br_flush;
     assign poison_RF      = br_flush;
-    assign poison_EX1     = br_flush | hd_flush_RF_EX1;
-    assign poison_BR      = stall_EX1 | br_flush;
+    assign poison_EX1_0   = br_flush | hd_flush_RF_EX1_0;
+    assign poison_EX1_1   = br_flush | hd_flush_RF_EX1_1;
+    assign poison_BR_0    = stall_EX1 | br_flush;
+    assign poison_BR_1    = stall_EX1 | br_flush;
     // 后端乘除法阻塞或发生全局冲刷时，就地截断并转化为 NOP 气泡，彻底防止 EX1 阶段的推测性指令逃逸至 BR
 
     // =========================================================================
@@ -116,13 +128,14 @@ module myCPU (
     assign irom_addr = f1_pc_0;         // 绑定 I-ROM 物理驱动总线
 
     // 🌟 PC 选择器 (NLP 快径 + TAGE/NLP-aware 微冲刷 + RF 提前解析)
-    assign actual_next_pc = br_take_trap   ? trap_pc :
-                            br_mispredict  ? br_actual_target :
-                            early_flush    ? early_flush_target :
-                            f5_micro_flush ? f5_micro_target :
-                            stall_frontend ? f1_pc_0 :
-                            nlp_hit        ? nlp_target :
-                                             (f1_pc_0 + 8);
+    assign actual_next_pc = br_take_trap    ? trap_pc :
+                            br_mispredict_0 ? br_actual_target :
+                            br_mispredict_1 ? br_actual_target_1 :
+                            early_flush     ? early_flush_target :
+                            f5_micro_flush  ? f5_micro_target :
+                            stall_frontend  ? f1_pc_0 :
+                            nlp_hit         ? nlp_target :
+                                              (f1_pc_0 + 8);
 
     // 程序计数器 (Program Counter) 物理寄存器例化
     PC #(DATAWIDTH, RESET_VAL) pc_inst (
@@ -178,6 +191,7 @@ module myCPU (
     logic [31:0] f2_pred_tgt_0, f2_pred_tgt_1;
     logic br_is_jump_or_branch, br_actual_taken;
     logic [31:0] br_pc;
+    logic [31:0] br_pc_1;  // inst1 BR PC
 
     // 主路分支预测器 (处理 PC_0 处的跳转控制流)
     BranchPredictor #(32, 10) bp_inst_0 (
@@ -461,15 +475,28 @@ module myCPU (
         (((id_rs1_1 != 5'd0) && (id_rd_0 == id_rs1_1)) ||
          ((id_rs2_1 != 5'd0) && (id_rd_0 == id_rs2_1)));
     wire pc_adjacent = (id_pc_1 == id_pc_0 + 4);
-    // 当 inst0 是分支/跳转/CSR/trap时禁止双发射
-    wire inst0_ctrl = id_IsBranch_0 || (id_JmpType_0 != 2'b00) || id_IsEcall_0 || id_IsEbreak_0 || id_IsMret_0;
     // RAW hazard: inst0 reads a register that inst1 writes (inst1→inst0 dependency)
     wire raw_1_to_0 = id_RegWen_1 && (id_rd_1 != 5'd0) &&
         (((id_rs1_0 != 5'd0) && (id_rd_1 == id_rs1_0)) ||
          ((id_rs2_0 != 5'd0) && (id_rd_1 == id_rs2_0)));
     // Load-inst0 dual-issue is safe: load_use_0_to_1 already blocks load→inst1 hazard
     // RAW inst1→inst0 prevented by raw_1_to_0 check
-    wire can_dual = id_valid_1 && inst1_simple_alu && !waw_conflict && !load_use_0_to_1 && !raw_1_to_0 && pc_adjacent && !inst0_ctrl;
+    wire load_use_1_to_0 = (id_WbSel_1 == 2'b10) && id_RegWen_1 && (id_rd_1 != 5'd0) &&
+        (((id_rs1_0 != 5'd0) && (id_rd_1 == id_rs1_0)) ||
+         ((id_rs2_0 != 5'd0) && (id_rd_1 == id_rs2_0)));
+    // Structural hazard checks
+    wire inst0_mem  = (id_WbSel_0 == 2'b10) || id_MemWen_0;
+    wire inst1_mem  = (id_WbSel_1 == 2'b10) || id_MemWen_1;
+    wire inst0_ctrl = id_IsBranch_0 || (id_JmpType_0 != 2'b00) || id_IsEcall_0 || id_IsEbreak_0 || id_IsMret_0;
+    wire inst1_ctrl = id_IsBranch_1 || (id_JmpType_1 != 2'b00) || id_IsEcall_1 || id_IsEbreak_1 || id_IsMret_1;
+
+    // TEMP: keep old restrictions while infrastructure matures
+    // Full symmetric can_dual (commented): see plan.md for final version
+    wire inst1_simple_alu_keep = !id_IsBranch_1 && (id_JmpType_1 == 2'b00) &&
+        !id_MemWen_1 && (id_WbSel_1 != 2'b10) && !id_is_M_1 &&
+        !id_IsEcall_1 && !id_IsEbreak_1 && !id_IsMret_1 && !id_CsrWen_1;
+    wire can_dual = id_valid_1 && pc_adjacent && inst1_simple_alu_keep
+        && !waw_conflict && !load_use_0_to_1 && !raw_1_to_0 && !inst0_ctrl;
     assign dual_pop_count = can_dual ? 2'd2 : (id_valid_0 ? 2'd1 : 2'd0);
 
     // =========================================================================
@@ -621,7 +648,7 @@ module myCPU (
 
     // inst0 EX1 register
     RF_EX1_Reg #(DATAWIDTH) rf_ex1_0 (
-        .clk(cpu_clk), .rst(cpu_rst), .stall(stall_EX1), .poison(poison_EX1),
+        .clk(cpu_clk), .rst(cpu_rst), .stall(stall_EX1), .poison(poison_EX1_0),
         .rf_valid(rf_valid_0), .rf_is_M(rf_is_M_0), .rf_pc(rf_pc_0), .rf_inst(rf_inst_0),
         .rf_imm(rf_imm_0), .rf_branch_target(rf_branch_target_0), .rf_ret_pc(rf_ret_pc_0),
         .rf_fw_rs1_data(rf_rs1_dat_0), .rf_fw_rs2_data(rf_rs2_dat_0),
@@ -647,7 +674,7 @@ module myCPU (
 
     // inst1 EX1 register (valid only when can_dual)
     RF_EX1_Reg #(DATAWIDTH) rf_ex1_1 (
-        .clk(cpu_clk), .rst(cpu_rst), .stall(stall_EX1), .poison(poison_EX1),
+        .clk(cpu_clk), .rst(cpu_rst), .stall(stall_EX1), .poison(poison_EX1_1),
         .rf_valid(rf_valid_1), .rf_is_M(rf_is_M_1), .rf_pc(rf_pc_1), .rf_inst(rf_inst_1),
         .rf_imm(rf_imm_1), .rf_branch_target(rf_branch_target_1), .rf_ret_pc(rf_ret_pc_1),
         .rf_fw_rs1_data(rf_rs1_dat_1), .rf_fw_rs2_data(rf_rs2_dat_1),
@@ -685,15 +712,37 @@ module myCPU (
         .id_forward_A(fwd_A_0), .id_forward_B(fwd_B_0)
     );
 
-    // Forwarding for inst1 (from BR/MEM1/MEM2/WB, same stages)
-    logic [2:0] fwd_A_1, fwd_B_1;
-    ForwardingUnit fw_1 (
+    // Forwarding for inst0: cross-pipeline (sees inst1's pipeline)
+    logic [2:0] fwd_A_0_cross, fwd_B_0_cross;
+    ForwardingUnit fw_0_cross (
+        .id_rs1(ex1_rs1_0), .id_rs2(ex1_rs2_0),
+        .ex_RegWen(br_valid_1 & br_RegWen_1), .ex_rd(br_rd_1),
+        .mem1_RegWen(mem1_valid_1 & mem1_RegWen_1), .mem1_rd(mem1_rd_1),
+        .mem2_RegWen(mem2_valid_1 & mem2_RegWen_1), .mem2_rd(mem2_rd_1),
+        .wb_RegWen(wb_valid_1_pipe & wb_RegWen_1_pipe), .wb_rd(wb_rd_1_pipe),
+        .id_forward_A(fwd_A_0_cross), .id_forward_B(fwd_B_0_cross)
+    );
+
+    // Forwarding for inst1: cross-pipeline (sees inst0's pipeline)
+    logic [2:0] fwd_A_1_cross, fwd_B_1_cross;
+    ForwardingUnit fw_1_cross (
         .id_rs1(ex1_rs1_1), .id_rs2(ex1_rs2_1),
         .ex_RegWen(br_valid_0 & br_RegWen_0), .ex_rd(br_rd_0),
         .mem1_RegWen(mem1_valid_0 & mem1_RegWen_0), .mem1_rd(mem1_rd_0),
         .mem2_RegWen(mem2_valid_0 & mem2_RegWen_0), .mem2_rd(mem2_rd_0),
         .wb_RegWen(wb_valid_0 & wb_RegWen_0), .wb_rd(wb_rd_0),
-        .id_forward_A(fwd_A_1), .id_forward_B(fwd_B_1)
+        .id_forward_A(fwd_A_1_cross), .id_forward_B(fwd_B_1_cross)
+    );
+
+    // Forwarding for inst1: self-pipeline (sees inst1's pipeline)
+    logic [2:0] fwd_A_1_self, fwd_B_1_self;
+    ForwardingUnit fw_1_self (
+        .id_rs1(ex1_rs1_1), .id_rs2(ex1_rs2_1),
+        .ex_RegWen(br_valid_1 & br_RegWen_1), .ex_rd(br_rd_1),
+        .mem1_RegWen(mem1_valid_1 & mem1_RegWen_1), .mem1_rd(mem1_rd_1),
+        .mem2_RegWen(mem2_valid_1 & mem2_RegWen_1), .mem2_rd(mem2_rd_1),
+        .wb_RegWen(wb_valid_1_pipe & wb_RegWen_1_pipe), .wb_rd(wb_rd_1_pipe),
+        .id_forward_A(fwd_A_1_self), .id_forward_B(fwd_B_1_self)
     );
 
     // Inter-instruction forward: inst0 ALU result → inst1 operand (combinational)
@@ -752,10 +801,10 @@ module myCPU (
         // inst1 A: inter-inst > inst1 self d1 > inst0 pipe > inst1 older > regfile
         if      (inst0_to_inst1_A)       ex1_fwd_1_A = ex1_alu_res_0;
         else if (f1A_self_d1)            ex1_fwd_1_A = inst1_wb_d1;
-        else if (fwd_A_1 == 3'b100)      ex1_fwd_1_A = br_fw_data_0;
-        else if (fwd_A_1 == 3'b011)      ex1_fwd_1_A = mem1_fw_data_0;
-        else if (fwd_A_1 == 3'b010)      ex1_fwd_1_A = mem2_fw_data_0;
-        else if (fwd_A_1 == 3'b001)      ex1_fwd_1_A = wb_data_0;
+        else if (fwd_A_1_cross == 3'b100)      ex1_fwd_1_A = br_fw_data_0;
+        else if (fwd_A_1_cross == 3'b011)      ex1_fwd_1_A = mem1_fw_data_0;
+        else if (fwd_A_1_cross == 3'b010)      ex1_fwd_1_A = mem2_fw_data_0;
+        else if (fwd_A_1_cross == 3'b001)      ex1_fwd_1_A = wb_data_0;
         else if (f1A_self_d2)            ex1_fwd_1_A = inst1_wb_d2;
         else if (f1A_self_d3)            ex1_fwd_1_A = inst1_wb_d3;
         else if (f1A_self_wb)            ex1_fwd_1_A = wb_data_1;
@@ -764,10 +813,10 @@ module myCPU (
         // inst1 B: inter-inst > inst1 self d1 > inst0 pipe > inst1 older > regfile
         if      (inst0_to_inst1_B)       ex1_fwd_1_B = ex1_alu_res_0;
         else if (f1B_self_d1)            ex1_fwd_1_B = inst1_wb_d1;
-        else if (fwd_B_1 == 3'b100)      ex1_fwd_1_B = br_fw_data_0;
-        else if (fwd_B_1 == 3'b011)      ex1_fwd_1_B = mem1_fw_data_0;
-        else if (fwd_B_1 == 3'b010)      ex1_fwd_1_B = mem2_fw_data_0;
-        else if (fwd_B_1 == 3'b001)      ex1_fwd_1_B = wb_data_0;
+        else if (fwd_B_1_cross == 3'b100)      ex1_fwd_1_B = br_fw_data_0;
+        else if (fwd_B_1_cross == 3'b011)      ex1_fwd_1_B = mem1_fw_data_0;
+        else if (fwd_B_1_cross == 3'b010)      ex1_fwd_1_B = mem2_fw_data_0;
+        else if (fwd_B_1_cross == 3'b001)      ex1_fwd_1_B = wb_data_0;
         else if (f1B_self_d2)            ex1_fwd_1_B = inst1_wb_d2;
         else if (f1B_self_d3)            ex1_fwd_1_B = inst1_wb_d3;
         else if (f1B_self_wb)            ex1_fwd_1_B = wb_data_1;
@@ -794,10 +843,12 @@ module myCPU (
         .funct3(ex1_funct3_0), .a(ex1_fwd_0_A), .b(ex1_fwd_0_B),
         .result(mdu_res), .busy(mdu_busy), .done(mdu_done));
     wire [31:0] final_alu_0 = ex1_is_M_0 ? mdu_res : ex1_alu_res_0;
+    wire [31:0] final_alu_1 = ex1_alu_res_1;  // inst1: no MDU, ALU result is final
 
-    // AGU (仅 inst0)
-    wire [31:0] ex1_agu_res;
-    AGU #(DATAWIDTH) agu_inst (.base(ex1_fwd_0_A), .offset(ex1_imm_0), .addr(ex1_agu_res));
+    // AGU (dual)
+    wire [31:0] ex1_agu_res_0, ex1_agu_res_1;
+    AGU #(DATAWIDTH) agu_inst_0 (.base(ex1_fwd_0_A), .offset(ex1_imm_0), .addr(ex1_agu_res_0));
+    AGU #(DATAWIDTH) agu_inst_1 (.base(ex1_fwd_1_A), .offset(ex1_imm_1), .addr(ex1_agu_res_1));
 
     // =========================================================================
     // Stage 8: BR 级 (仅 inst0, inst1 不是分支)
@@ -809,11 +860,11 @@ module myCPU (
     logic [4:0] br_rd_0; logic br_RegWen_0;
 
     EX1_BR_Reg #(DATAWIDTH) ex1_br_0 (
-        .clk(cpu_clk), .rst(cpu_rst), .stall(1'b0), .poison(poison_BR),
+        .clk(cpu_clk), .rst(cpu_rst), .stall(1'b0), .poison(poison_BR_0),
         .ex1_valid(ex1_valid_0), .ex1_pc(ex1_pc_0), .ex1_inst(ex1_inst_0),
         .ex1_ret_pc(ex1_ret_pc_0), .ex1_branch_target(ex1_br_tgt_0),
         .ex1_alu_res(final_alu_0), .ex1_fw_rs1_data(ex1_fwd_0_A),
-        .ex1_fw_rs2_data(ex1_fwd_0_B), .ex1_agu_res(ex1_agu_res),
+        .ex1_fw_rs2_data(ex1_fwd_0_B), .ex1_agu_res(ex1_agu_res_0),
         .ex1_rd(ex1_rd_0), .ex1_RegWen(ex1_RegWen_0), .ex1_MemWen(ex1_MemWen_0),
         .ex1_IsBranch(ex1_IsBranch_0), .ex1_JmpType(ex1_JmpType_0),
         .ex1_WbSel(ex1_WbSel_0), .ex1_funct3(ex1_funct3_0),
@@ -826,6 +877,33 @@ module myCPU (
         .br_IsBranch(br_IsBranch_0), .br_JmpType(br_JmpType_0),
         .br_WbSel(br_WbSel_0), .br_funct3(br_funct3_0),
         .br_pred_taken(br_pred_taken_0), .br_pred_target(br_pred_tgt_0)
+    );
+
+    // === inst1 BR stage (new symmetric pipeline) ===
+    logic br_valid_1, br_MemWen_1, br_IsBranch_1;
+    logic [31:0] br_inst_1, br_ret_pc_1, br_br_tgt_1, br_alu_res_1;
+    logic [31:0] br_fw_rs1_1, br_fw_rs2_1, br_agu_res_1, br_pred_tgt_1;
+    logic [1:0] br_JmpType_1, br_WbSel_1; logic [2:0] br_funct3_1; logic br_pred_taken_1;
+    logic [4:0] br_rd_1; logic br_RegWen_1;
+
+    EX1_BR_Reg #(DATAWIDTH) ex1_br_1 (
+        .clk(cpu_clk), .rst(cpu_rst), .stall(1'b0), .poison(poison_BR_1),
+        .ex1_valid(ex1_valid_1), .ex1_pc(ex1_pc_1), .ex1_inst(ex1_inst_1),
+        .ex1_ret_pc(ex1_ret_pc_1), .ex1_branch_target(ex1_br_tgt_1),
+        .ex1_alu_res(final_alu_1), .ex1_fw_rs1_data(ex1_fwd_1_A),
+        .ex1_fw_rs2_data(ex1_fwd_1_B), .ex1_agu_res(ex1_agu_res_1),
+        .ex1_rd(ex1_rd_1), .ex1_RegWen(ex1_RegWen_1), .ex1_MemWen(ex1_MemWen_1),
+        .ex1_IsBranch(ex1_IsBranch_1), .ex1_JmpType(ex1_JmpType_1),
+        .ex1_WbSel(ex1_WbSel_1), .ex1_funct3(ex1_funct3_1),
+        .ex1_pred_taken(ex1_pred_taken_1), .ex1_pred_target(ex1_pred_tgt_1),
+        .br_valid(br_valid_1), .br_pc(br_pc_1), .br_inst(br_inst_1),
+        .br_ret_pc(br_ret_pc_1), .br_branch_target(br_br_tgt_1),
+        .br_alu_res(br_alu_res_1), .br_fw_rs1_data(br_fw_rs1_1),
+        .br_fw_rs2_data(br_fw_rs2_1), .br_agu_res(br_agu_res_1),
+        .br_rd(br_rd_1), .br_RegWen(br_RegWen_1), .br_MemWen(br_MemWen_1),
+        .br_IsBranch(br_IsBranch_1), .br_JmpType(br_JmpType_1),
+        .br_WbSel(br_WbSel_1), .br_funct3(br_funct3_1),
+        .br_pred_taken(br_pred_taken_1), .br_pred_target(br_pred_tgt_1)
     );
 
     wire br_is_ctrl = br_IsBranch_0 || (br_JmpType_0 != 2'b00);
@@ -846,7 +924,7 @@ module myCPU (
     end
     assign br_misp = br_actual_taken ^ br_pred_taken_0;
     assign tgt_misp = br_actual_taken & br_pred_taken_0 & tgt_mismatch;
-    assign br_mispredict = br_valid_0 & ((br_is_ctrl & (br_misp | tgt_misp)) | (~br_is_ctrl & br_pred_taken_0));
+    assign br_mispredict_0 = br_valid_0 & ((br_is_ctrl & (br_misp | tgt_misp)) | (~br_is_ctrl & br_pred_taken_0));
 
     // CSR (仅 inst0)
     wire br_IsEcall  = br_inst_0[6:0] == 7'b1110011 && br_inst_0[31:20] == 12'h000;
@@ -866,8 +944,31 @@ module myCPU (
         .rdata(br_csr_rdata_0), .trap_pc(trap_pc));
     wire [31:0] br_fw_data_0 = (br_WbSel_0 == 2'b01) ? br_ret_pc_0 : (br_WbSel_0 == 2'b11) ? br_csr_rdata_0 : br_alu_res_0;
 
+    // === inst1 BranchUnit (Phase 4: symmetric branch support) ===
+    wire br_is_ctrl_1 = br_IsBranch_1 || (br_JmpType_1 != 2'b00);
+    wire [31:0] br_actual_target_1;
+    wire br_actual_taken_1;
+    BranchUnit #(DATAWIDTH) bu_inst_1 (
+        .imm(32'b0),
+        .rs1_data(br_fw_rs1_1), .rs2_data(br_fw_rs2_1),
+        .precalc_branch_target(br_br_tgt_1), .precalc_pc_plus_4(br_ret_pc_1),
+        .trap_pc(trap_pc), .Branch(br_IsBranch_1), .Jump(br_JmpType_1),
+        .funct3(br_funct3_1), .next_pc(br_actual_target_1), .actual_taken(br_actual_taken_1)
+    );
+
+    // inst1 mispredict detection
+    logic tgt_mismatch_1, br_misp_1, tgt_misp_1;
+    always_comb begin
+        if (br_JmpType_1 == 2'b10) tgt_mismatch_1 = (br_actual_target_1 != br_pred_tgt_1);
+        else if (br_JmpType_1 == 2'b11) tgt_mismatch_1 = (br_pred_tgt_1 != trap_pc);
+        else tgt_mismatch_1 = (br_pred_tgt_1 != br_br_tgt_1);
+    end
+    assign br_misp_1 = br_actual_taken_1 ^ br_pred_taken_1;
+    assign tgt_misp_1 = br_actual_taken_1 & br_pred_taken_1 & tgt_mismatch_1;
+    assign br_mispredict_1 = br_valid_1 & ((br_is_ctrl_1 & (br_misp_1 | tgt_misp_1)) | (~br_is_ctrl_1 & br_pred_taken_1));
+
     // =========================================================================
-    // MEM1-MEM2-WB (单路: 仅 inst0 访存, inst1 直接透传 ALU 结果)
+    // MEM1-MEM2-WB (双路: inst0 + inst1 memory MUX)
     // =========================================================================
     logic mem1_valid_0, mem1_MemWen_0;
     logic [31:0] mem1_pc_0, mem1_inst_0, mem1_ret_pc_0, mem1_alu_res_0;
@@ -890,11 +991,27 @@ module myCPU (
         .mem1_RegWen(mem1_RegWen_0), .mem1_MemWen(mem1_MemWen_0),
         .mem1_WbSel(mem1_WbSel_0), .mem1_funct3(mem1_funct3_0)
     );
-    assign perip_addr = mem1_agu_res_0;
-    assign perip_wen  = mem1_valid_0 & mem1_MemWen_0;
-    StoreAlign #(DATAWIDTH) sa (.addr_offset(mem1_agu_res_0[1:0]), .wdata_in(mem1_fw_rs2_0),
+    // Memory port MUX: inst0 priority, inst1 uses port when inst0 doesn't need it
+    wire mem1_use_0 = mem1_valid_0 & (mem1_MemWen_0 | (mem1_WbSel_0 == 2'b10));
+    wire mem1_use_1 = mem1_valid_1 & (mem1_MemWen_1 | (mem1_WbSel_1 == 2'b10)) & ~mem1_use_0;
+
+    // inst0 StoreAlign
+    wire [3:0] perip_mask_0; wire [31:0] perip_wdata_0;
+    StoreAlign #(DATAWIDTH) sa_0 (.addr_offset(mem1_agu_res_0[1:0]), .wdata_in(mem1_fw_rs2_0),
         .size_mask(mem1_funct3_0[1:0]), .MemWrite(mem1_valid_0 & mem1_MemWen_0),
-        .wmask_out(perip_mask), .wdata_out(perip_wdata));
+        .wmask_out(perip_mask_0), .wdata_out(perip_wdata_0));
+
+    // inst1 StoreAlign
+    wire [3:0] perip_mask_1; wire [31:0] perip_wdata_1;
+    StoreAlign #(DATAWIDTH) sa_1 (.addr_offset(mem1_agu_res_1[1:0]), .wdata_in(mem1_fw_rs2_1),
+        .size_mask(mem1_funct3_1[1:0]), .MemWrite(mem1_valid_1 & mem1_MemWen_1),
+        .wmask_out(perip_mask_1), .wdata_out(perip_wdata_1));
+
+    assign perip_addr  = mem1_use_0 ? mem1_agu_res_0 : mem1_agu_res_1;
+    assign perip_wen   = mem1_use_0 ? (mem1_valid_0 & mem1_MemWen_0) : (mem1_valid_1 & mem1_MemWen_1);
+    assign perip_mask  = mem1_use_0 ? perip_mask_0 : perip_mask_1;
+    assign perip_wdata = mem1_use_0 ? perip_wdata_0 : perip_wdata_1;
+
     wire [31:0] mem1_fw_data_0 = (mem1_WbSel_0 == 2'b01) ? mem1_ret_pc_0 :
         (mem1_WbSel_0 == 2'b11) ? mem1_csr_rdata_0 : mem1_alu_res_0;
 
@@ -934,6 +1051,74 @@ module myCPU (
         .wb_non_load_data(wb_nd_0), .wb_perip_rdata(wb_prdata_0),
         .wb_agu_res_1_0(wb_agu_lo_0), .wb_funct3(wb_funct3_0),
         .wb_WbSel(wb_WbSel_0), .wb_rd(wb_rd_0), .wb_RegWen(wb_RegWen_0)
+    );
+
+    // === inst1 forwarding data at BR stage ===
+    wire [31:0] br_fw_data_1 = br_alu_res_1;
+
+    // === inst1 MEM1 stage (new symmetric pipeline) ===
+    logic mem1_valid_1, mem1_MemWen_1;
+    logic [31:0] mem1_pc_1, mem1_inst_1, mem1_ret_pc_1, mem1_alu_res_1;
+    logic [31:0] mem1_fw_rs2_1, mem1_agu_res_1, mem1_csr_rdata_1;
+    logic [1:0] mem1_WbSel_1; logic [2:0] mem1_funct3_1;
+    logic [4:0] mem1_rd_1; logic mem1_RegWen_1;
+
+    BR_MEM1_Reg #(DATAWIDTH) br_mem1_1 (
+        .clk(cpu_clk), .rst(cpu_rst), .stall(1'b0), .poison(1'b0),
+        .br_valid(br_valid_1), .br_pc(br_pc_1), .br_inst(br_inst_1),
+        .br_ret_pc(br_ret_pc_1), .br_alu_res(br_alu_res_1),
+        .br_fw_rs2_data(br_fw_rs2_1), .br_agu_res(br_agu_res_1),
+        .br_csr_rdata(32'b0), .br_rd(br_rd_1),
+        .br_RegWen(br_RegWen_1), .br_MemWen(br_MemWen_1), .br_WbSel(br_WbSel_1),
+        .br_funct3(br_funct3_1),
+        .mem1_valid(mem1_valid_1), .mem1_pc(mem1_pc_1), .mem1_inst(mem1_inst_1),
+        .mem1_ret_pc(mem1_ret_pc_1), .mem1_alu_res(mem1_alu_res_1),
+        .mem1_fw_rs2_data(mem1_fw_rs2_1), .mem1_agu_res(mem1_agu_res_1),
+        .mem1_csr_rdata(mem1_csr_rdata_1), .mem1_rd(mem1_rd_1),
+        .mem1_RegWen(mem1_RegWen_1), .mem1_MemWen(mem1_MemWen_1),
+        .mem1_WbSel(mem1_WbSel_1), .mem1_funct3(mem1_funct3_1)
+    );
+    wire [31:0] mem1_fw_data_1 = (mem1_WbSel_1 == 2'b01) ? mem1_ret_pc_1 :
+        (mem1_WbSel_1 == 2'b11) ? mem1_csr_rdata_1 : mem1_alu_res_1;
+
+    // === inst1 MEM2 stage ===
+    logic mem2_valid_1;
+    logic [31:0] mem2_pc_1, mem2_inst_1, mem2_ret_pc_1, mem2_alu_res_1, mem2_agu_res_1, mem2_csr_rdata_1;
+    logic [1:0] mem2_WbSel_1; logic [2:0] mem2_funct3_1;
+    logic [4:0] mem2_rd_1; logic mem2_RegWen_1;
+
+    MEM1_MEM2_Reg #(DATAWIDTH) mem1_mem2_1 (
+        .clk(cpu_clk), .rst(cpu_rst), .stall(1'b0), .poison(1'b0),
+        .mem1_valid(mem1_valid_1), .mem1_pc(mem1_pc_1), .mem1_inst(mem1_inst_1),
+        .mem1_ret_pc(mem1_ret_pc_1), .mem1_alu_res(mem1_alu_res_1),
+        .mem1_agu_res(mem1_agu_res_1), .mem1_csr_rdata(mem1_csr_rdata_1),
+        .mem1_rd(mem1_rd_1), .mem1_RegWen(mem1_RegWen_1), .mem1_WbSel(mem1_WbSel_1),
+        .mem1_funct3(mem1_funct3_1),
+        .mem2_valid(mem2_valid_1), .mem2_pc(mem2_pc_1), .mem2_inst(mem2_inst_1),
+        .mem2_ret_pc(mem2_ret_pc_1), .mem2_alu_res(mem2_alu_res_1),
+        .mem2_agu_res(mem2_agu_res_1), .mem2_csr_rdata(mem2_csr_rdata_1),
+        .mem2_rd(mem2_rd_1), .mem2_RegWen(mem2_RegWen_1), .mem2_WbSel(mem2_WbSel_1),
+        .mem2_funct3(mem2_funct3_1)
+    );
+    wire [31:0] mem2_nd_1 = (mem2_WbSel_1 == 2'b01) ? mem2_ret_pc_1 :
+        (mem2_WbSel_1 == 2'b11) ? mem2_csr_rdata_1 : mem2_alu_res_1;
+    wire [31:0] mem2_fw_data_1 = (mem2_WbSel_1 == 2'b10) ? perip_rdata : mem2_nd_1;
+
+    // === inst1 WB stage (unused for now, shift register still drives wb_*) ===
+    logic wb_valid_1_pipe, wb_RegWen_1_pipe;
+    logic [31:0] wb_pc_1_pipe, wb_inst_1_pipe, wb_nd_1_pipe, wb_prdata_1_pipe;
+    logic [1:0] wb_agu_lo_1_pipe, wb_WbSel_1_pipe; logic [2:0] wb_funct3_1_pipe;
+    logic [4:0] wb_rd_1_pipe;
+    MEM2_WB_Reg #(DATAWIDTH) mem2_wb_1 (
+        .clk(cpu_clk), .rst(cpu_rst), .stall(1'b0), .poison(1'b0),
+        .mem2_valid(mem2_valid_1), .mem2_pc(mem2_pc_1), .mem2_inst(mem2_inst_1),
+        .mem2_non_load_data(mem2_nd_1), .mem2_perip_rdata(perip_rdata),
+        .mem2_agu_res_1_0(mem2_agu_res_1[1:0]), .mem2_funct3(mem2_funct3_1),
+        .mem2_WbSel(mem2_WbSel_1), .mem2_rd(mem2_rd_1), .mem2_RegWen(mem2_RegWen_1),
+        .wb_valid(wb_valid_1_pipe), .wb_pc(wb_pc_1_pipe), .wb_inst(wb_inst_1_pipe),
+        .wb_non_load_data(wb_nd_1_pipe), .wb_perip_rdata(wb_prdata_1_pipe),
+        .wb_agu_res_1_0(wb_agu_lo_1_pipe), .wb_funct3(wb_funct3_1_pipe),
+        .wb_WbSel(wb_WbSel_1_pipe), .wb_rd(wb_rd_1_pipe), .wb_RegWen(wb_RegWen_1_pipe)
     );
 
     // WB inst1: 4-cycle shift register matching inst0 EX1→BR→MEM1→MEM2→WB
@@ -988,7 +1173,7 @@ module myCPU (
         .ex_RegWen(ex1_valid_0 & ex1_RegWen_0), .ex_WbSel(ex1_WbSel_0), .ex_rd(ex1_rd_0),
         .mem1_RegWen(br_valid_0 & br_RegWen_0), .mem1_WbSel(br_WbSel_0), .mem1_rd(br_rd_0),
         .ls_RegWen(mem1_valid_0 & mem1_RegWen_0), .ls_WbSel(mem1_WbSel_0), .ls_rd(mem1_rd_0),
-        .stall_ID(hd_stall_RF), .flush_ID_EX(hd_flush_RF_EX1)
+        .stall_ID(hd_stall_RF), .flush_ID_EX(hd_flush_RF_EX1_0)
     );
 
     // =========================================================================
@@ -1061,7 +1246,7 @@ module myCPU (
             pf_commits <= pf_commits + (wb_valid_0 ? 1 : 0) + (wb_valid_1 ? 1 : 0);
             if (wb_valid_0 & wb_valid_1) pf_dual <= pf_dual + 1;
             if (f5_valid & (f5_is_c0 | f5_is_c1)) pf_branches <= pf_branches + 1;
-            if (br_mispredict) pf_mispredicts <= pf_mispredicts + 1;
+            if (br_mispredict_0 | br_mispredict_1) pf_mispredicts <= pf_mispredicts + 1;
             if (early_flush) pf_early <= pf_early + 1;
             if (f5_micro_flush) pf_micro <= pf_micro + 1;
             if (br_flush) pf_br <= pf_br + 1;
