@@ -93,12 +93,8 @@ module myCPU (
     assign stall_ID       = stall_RF; 
     assign stall_IQ_pop   = stall_ID;
 
-    // Per-pipeline flush preparation (Phase 2: split signals, keep identical behavior)
-    // br_mispredict_0 assigned later (after BranchUnit)
-    assign br_mispredict_1 = 1'b0;  // Phase 4: add inst1 BranchUnit
-    // hd_flush_RF_EX1_0 driven by HDU instance below
-    assign hd_flush_RF_EX1_1 = hd_flush_RF_EX1_0;  // Same: load-use flushes both pipelines
-
+    // Per-pipeline flush: br_mispredict_0/1 driven by BranchUnits
+    // hd_flush_RF_EX1_0/1 driven by HDU instances below
     assign br_flush       = br_take_trap | br_mispredict_0 | br_mispredict_1;
 
     // 分布式拦截拓扑关系映射
@@ -490,13 +486,9 @@ module myCPU (
     wire inst0_ctrl = id_IsBranch_0 || (id_JmpType_0 != 2'b00) || id_IsEcall_0 || id_IsEbreak_0 || id_IsMret_0;
     wire inst1_ctrl = id_IsBranch_1 || (id_JmpType_1 != 2'b00) || id_IsEcall_1 || id_IsEbreak_1 || id_IsMret_1;
 
-    // TEMP: keep old restrictions while infrastructure matures
-    // Full symmetric can_dual (commented): see plan.md for final version
-    wire inst1_simple_alu_keep = !id_IsBranch_1 && (id_JmpType_1 == 2'b00) &&
-        !id_MemWen_1 && (id_WbSel_1 != 2'b10) && !id_is_M_1 &&
-        !id_IsEcall_1 && !id_IsEbreak_1 && !id_IsMret_1 && !id_CsrWen_1;
-    wire can_dual = id_valid_1 && pc_adjacent && inst1_simple_alu_keep
-        && !waw_conflict && !load_use_0_to_1 && !raw_1_to_0 && !inst0_ctrl;
+    // Working config: inst1 still simple ALU, inst0 allowed to be load
+    wire can_dual = id_valid_1 && inst1_simple_alu && !waw_conflict && !load_use_0_to_1 && !raw_1_to_0 && pc_adjacent && !inst0_ctrl;
+    // TODO: Phase 8 — remove inst1_simple_alu restriction (requires forwarding mux update)
     assign dual_pop_count = can_dual ? 2'd2 : (id_valid_0 ? 2'd1 : 2'd0);
 
     // =========================================================================
@@ -1168,13 +1160,28 @@ module myCPU (
     // =========================================================================
     // Hazard Detection (仅 inst0, 因为 inst1 仅在无依赖时发射)
     // =========================================================================
-    HazardDetectionUnit hd_inst (
+    // HDU for inst0
+    logic hd_stall_RF_0;
+    HazardDetectionUnit hd_inst_0 (
         .id_rs1(rf_rs1_0), .id_rs2(rf_rs2_0), .id_opcode(rf_inst_0[6:0]),
         .ex_RegWen(ex1_valid_0 & ex1_RegWen_0), .ex_WbSel(ex1_WbSel_0), .ex_rd(ex1_rd_0),
         .mem1_RegWen(br_valid_0 & br_RegWen_0), .mem1_WbSel(br_WbSel_0), .mem1_rd(br_rd_0),
         .ls_RegWen(mem1_valid_0 & mem1_RegWen_0), .ls_WbSel(mem1_WbSel_0), .ls_rd(mem1_rd_0),
-        .stall_ID(hd_stall_RF), .flush_ID_EX(hd_flush_RF_EX1_0)
+        .stall_ID(hd_stall_RF_0), .flush_ID_EX(hd_flush_RF_EX1_0)
     );
+    // HDU for inst1 (Phase 6: second hazard detection unit)
+    logic hd_stall_RF_1;
+    logic hd_flush_RF_EX1_1_dummy;  // unused until Phase 8
+    HazardDetectionUnit hd_inst_1 (
+        .id_rs1(rf_rs1_1), .id_rs2(rf_rs2_1), .id_opcode(rf_inst_1[6:0]),
+        .ex_RegWen(ex1_valid_1 & ex1_RegWen_1), .ex_WbSel(ex1_WbSel_1), .ex_rd(ex1_rd_1),
+        .mem1_RegWen(br_valid_1 & br_RegWen_1), .mem1_WbSel(br_WbSel_1), .mem1_rd(br_rd_1),
+        .ls_RegWen(mem1_valid_1 & mem1_RegWen_1), .ls_WbSel(mem1_WbSel_1), .ls_rd(mem1_rd_1),
+        .stall_ID(hd_stall_RF_1), .flush_ID_EX(hd_flush_RF_EX1_1_dummy)
+    );
+    // Phase 6 TODO: enable hd_stall_RF_1 and hd_flush_RF_EX1_1 once verified
+    assign hd_flush_RF_EX1_1 = hd_flush_RF_EX1_0;  // keep shared for now
+    assign hd_stall_RF = hd_stall_RF_0;  // | hd_stall_RF_1;
 
     // =========================================================================
     // DiffTest + CSR Shadow (adapted for dual-issue, inst0 only)
