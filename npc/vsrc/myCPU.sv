@@ -486,9 +486,8 @@ module myCPU (
     wire inst0_ctrl = id_IsBranch_0 || (id_JmpType_0 != 2'b00) || id_IsEcall_0 || id_IsEbreak_0 || id_IsMret_0;
     wire inst1_ctrl = id_IsBranch_1 || (id_JmpType_1 != 2'b00) || id_IsEcall_1 || id_IsEbreak_1 || id_IsMret_1;
 
-    // Working config: inst1 still simple ALU, inst0 allowed to be load
+    // Revert to safe can_dual for infrastructure testing
     wire can_dual = id_valid_1 && inst1_simple_alu && !waw_conflict && !load_use_0_to_1 && !raw_1_to_0 && pc_adjacent && !inst0_ctrl;
-    // TODO: Phase 8 — remove inst1_simple_alu restriction (requires forwarding mux update)
     assign dual_pop_count = can_dual ? 2'd2 : (id_valid_0 ? 2'd1 : 2'd0);
 
     // =========================================================================
@@ -767,7 +766,7 @@ module myCPU (
 
     logic [31:0] ex1_fwd_0_A, ex1_fwd_0_B, ex1_fwd_1_A, ex1_fwd_1_B;
     always_comb begin
-        // inst0 A: inst1 d1 (newest) > inst0 pipe > inst1 older > regfile
+        // inst0 A: inst1 d1 > inst0 pipe > inst1 older > inst1 pipe regs > regfile
         if      (f1A_d1)                 ex1_fwd_0_A = inst1_wb_d1;
         else if (fwd_A_0 == 3'b100)      ex1_fwd_0_A = br_fw_data_0;
         else if (fwd_A_0 == 3'b011)      ex1_fwd_0_A = mem1_fw_data_0;
@@ -776,10 +775,13 @@ module myCPU (
         else if (f1A_d2)                 ex1_fwd_0_A = inst1_wb_d2;
         else if (f1A_d3)                 ex1_fwd_0_A = inst1_wb_d3;
         else if (f1A_wb)                 ex1_fwd_0_A = wb_data_1;
+        else if (fwd_A_0_cross == 3'b100) ex1_fwd_0_A = br_fw_data_1;
+        else if (fwd_A_0_cross == 3'b011) ex1_fwd_0_A = mem1_fw_data_1;
+        else if (fwd_A_0_cross == 3'b010) ex1_fwd_0_A = mem2_fw_data_1;
+        else if (fwd_A_0_cross == 3'b001) ex1_fwd_0_A = inst1_wb_data;
         else                             ex1_fwd_0_A = ex1_rs1_raw_0;
 
-        // inst0 B: inst0 pipe > inst1 pipe > regfile
-        // BUT: allow inst1 shift register d1 to override stale inst0 pipe forwarding
+        // inst0 B
         if      (f1B_d1)                 ex1_fwd_0_B = inst1_wb_d1;
         else if (fwd_B_0 == 3'b100)      ex1_fwd_0_B = br_fw_data_0;
         else if (fwd_B_0 == 3'b011)      ex1_fwd_0_B = mem1_fw_data_0;
@@ -788,30 +790,42 @@ module myCPU (
         else if (f1B_d2)                 ex1_fwd_0_B = inst1_wb_d2;
         else if (f1B_d3)                 ex1_fwd_0_B = inst1_wb_d3;
         else if (f1B_wb)                 ex1_fwd_0_B = wb_data_1;
+        else if (fwd_B_0_cross == 3'b100) ex1_fwd_0_B = br_fw_data_1;
+        else if (fwd_B_0_cross == 3'b011) ex1_fwd_0_B = mem1_fw_data_1;
+        else if (fwd_B_0_cross == 3'b010) ex1_fwd_0_B = mem2_fw_data_1;
+        else if (fwd_B_0_cross == 3'b001) ex1_fwd_0_B = inst1_wb_data;
         else                             ex1_fwd_0_B = ex1_rs2_raw_0;
 
-        // inst1 A: inter-inst > inst1 self d1 > inst0 pipe > inst1 older > regfile
+        // inst1 A: inter-inst > inst1 self d1 > inst0 pipe > inst1 older > inst1 pipeline > regfile
         if      (inst0_to_inst1_A)       ex1_fwd_1_A = ex1_alu_res_0;
         else if (f1A_self_d1)            ex1_fwd_1_A = inst1_wb_d1;
-        else if (fwd_A_1_cross == 3'b100)      ex1_fwd_1_A = br_fw_data_0;
-        else if (fwd_A_1_cross == 3'b011)      ex1_fwd_1_A = mem1_fw_data_0;
-        else if (fwd_A_1_cross == 3'b010)      ex1_fwd_1_A = mem2_fw_data_0;
-        else if (fwd_A_1_cross == 3'b001)      ex1_fwd_1_A = wb_data_0;
+        else if (fwd_A_1_cross == 3'b100) ex1_fwd_1_A = br_fw_data_0;
+        else if (fwd_A_1_cross == 3'b011) ex1_fwd_1_A = mem1_fw_data_0;
+        else if (fwd_A_1_cross == 3'b010) ex1_fwd_1_A = mem2_fw_data_0;
+        else if (fwd_A_1_cross == 3'b001) ex1_fwd_1_A = wb_data_0;
         else if (f1A_self_d2)            ex1_fwd_1_A = inst1_wb_d2;
         else if (f1A_self_d3)            ex1_fwd_1_A = inst1_wb_d3;
         else if (f1A_self_wb)            ex1_fwd_1_A = wb_data_1;
+        else if (fwd_A_1_self == 3'b100)  ex1_fwd_1_A = br_fw_data_1;
+        else if (fwd_A_1_self == 3'b011)  ex1_fwd_1_A = mem1_fw_data_1;
+        else if (fwd_A_1_self == 3'b010)  ex1_fwd_1_A = mem2_fw_data_1;
+        else if (fwd_A_1_self == 3'b001)  ex1_fwd_1_A = inst1_wb_data;
         else                             ex1_fwd_1_A = ex1_rs1_raw_1;
 
-        // inst1 B: inter-inst > inst1 self d1 > inst0 pipe > inst1 older > regfile
+        // inst1 B
         if      (inst0_to_inst1_B)       ex1_fwd_1_B = ex1_alu_res_0;
         else if (f1B_self_d1)            ex1_fwd_1_B = inst1_wb_d1;
-        else if (fwd_B_1_cross == 3'b100)      ex1_fwd_1_B = br_fw_data_0;
-        else if (fwd_B_1_cross == 3'b011)      ex1_fwd_1_B = mem1_fw_data_0;
-        else if (fwd_B_1_cross == 3'b010)      ex1_fwd_1_B = mem2_fw_data_0;
-        else if (fwd_B_1_cross == 3'b001)      ex1_fwd_1_B = wb_data_0;
+        else if (fwd_B_1_cross == 3'b100) ex1_fwd_1_B = br_fw_data_0;
+        else if (fwd_B_1_cross == 3'b011) ex1_fwd_1_B = mem1_fw_data_0;
+        else if (fwd_B_1_cross == 3'b010) ex1_fwd_1_B = mem2_fw_data_0;
+        else if (fwd_B_1_cross == 3'b001) ex1_fwd_1_B = wb_data_0;
         else if (f1B_self_d2)            ex1_fwd_1_B = inst1_wb_d2;
         else if (f1B_self_d3)            ex1_fwd_1_B = inst1_wb_d3;
         else if (f1B_self_wb)            ex1_fwd_1_B = wb_data_1;
+        else if (fwd_B_1_self == 3'b100)  ex1_fwd_1_B = br_fw_data_1;
+        else if (fwd_B_1_self == 3'b011)  ex1_fwd_1_B = mem1_fw_data_1;
+        else if (fwd_B_1_self == 3'b010)  ex1_fwd_1_B = mem2_fw_data_1;
+        else if (fwd_B_1_self == 3'b001)  ex1_fwd_1_B = inst1_wb_data;
         else                             ex1_fwd_1_B = ex1_rs2_raw_1;
     end
     wire [31:0] inst1_rs1_final = ex1_fwd_1_A;  // inst0→inst1 now handled inside always_comb
@@ -1056,7 +1070,7 @@ module myCPU (
     logic [4:0] mem1_rd_1; logic mem1_RegWen_1;
 
     BR_MEM1_Reg #(DATAWIDTH) br_mem1_1 (
-        .clk(cpu_clk), .rst(cpu_rst), .stall(1'b0), .poison(1'b0),
+        .clk(cpu_clk), .rst(cpu_rst), .stall(1'b0), .poison(poison_BR_1),
         .br_valid(br_valid_1), .br_pc(br_pc_1), .br_inst(br_inst_1),
         .br_ret_pc(br_ret_pc_1), .br_alu_res(br_alu_res_1),
         .br_fw_rs2_data(br_fw_rs2_1), .br_agu_res(br_agu_res_1),
@@ -1115,7 +1129,7 @@ module myCPU (
 
     // WB inst1: 4-cycle shift register matching inst0 EX1→BR→MEM1→MEM2→WB
     // inst1_d1_en blocks new captures during br_flush (same as EX1_BR_Reg poison_BR)
-    // d1→d2 gated by ~br_flush: kills inst1 paired with inst0 being flushed at BR
+    // d1→d2 killed only when inst0 branch is ACTUALLY taken (sequential path wrong)
     logic [31:0] inst1_wb_d1, inst1_wb_d2, inst1_wb_d3, inst1_wb_data;
     logic [31:0] inst1_wb_pc_d1, inst1_wb_pc_d2, inst1_wb_pc_d3, wb_pc_1;
     logic [4:0]  inst1_wb_rd_d1, inst1_wb_rd_d2, inst1_wb_rd_d3, inst1_wb_rd;
