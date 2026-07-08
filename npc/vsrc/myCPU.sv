@@ -497,9 +497,12 @@ module myCPU (
     wire inst0_ctrl = id_IsBranch_0 || (id_JmpType_0 != 2'b00) || id_IsEcall_0 || id_IsEbreak_0 || id_IsMret_0;
     wire inst1_ctrl = id_IsBranch_1 || (id_JmpType_1 != 2'b00) || id_IsEcall_1 || id_IsEbreak_1 || id_IsMret_1;
 
-    // Remove inst0_ctrl: inst0 can be branch in dual-issue.
-    // inst1_seq_wrong correctly handles pred-T/actual-NT (keep inst1) vs pred-NT/actual-T (kill inst1).
-    wire can_dual = id_valid_1 && inst1_simple_alu && !waw_conflict && !load_use_0_to_1 && !raw_1_to_0 && pc_adjacent;
+    // inst0 predicted taken gate: when inst0 is a ctrl insn predicted taken,
+    // inst1 at PC+4 is on the wrong sequential path. If prediction is correct,
+    // inst1_seq_wrong won't catch it (br_mispredict_0=0), so we block at issue.
+    wire inst0_pred_taken = inst0_ctrl && id_pred_taken_0;
+    // Step 1: relax !inst0_ctrl → !inst0_pred_taken (allow ctrl not-taken + ALU dual-issue)
+    wire can_dual = id_valid_1 && inst1_simple_alu && !waw_conflict && !load_use_0_to_1 && !raw_1_to_0 && pc_adjacent && !inst0_pred_taken;
     assign dual_pop_count = can_dual ? 2'd2 : (id_valid_0 ? 2'd1 : 2'd0);
 
     // =========================================================================
@@ -777,68 +780,71 @@ module myCPU (
     wire f1B_self_wb = wb_valid_1  && wb_RegWen_1  && (wb_rd_1  != 5'd0) && (wb_rd_1  == ex1_rs2_1);
 
     logic [31:0] ex1_fwd_0_A, ex1_fwd_0_B, ex1_fwd_1_A, ex1_fwd_1_B;
+    // Forwarding priority: interleaved by pipeline depth (age), youngest first.
+    // At each depth: inst1 shift_reg > self_pipe > cross_pipe (inst1 younger program order wins).
+    // This prevents older self-pipeline data from masking fresher cross-pipeline data.
     always_comb begin
-        // inst0 A: inst1 d1 > inst0 pipe > inst1 older > inst1 pipe regs > regfile
-        if      (f1A_d1)                 ex1_fwd_0_A = inst1_wb_d1;
-        else if (fwd_A_0 == 3'b100)      ex1_fwd_0_A = br_fw_data_0;
-        else if (fwd_A_0 == 3'b011)      ex1_fwd_0_A = mem1_fw_data_0;
-        else if (fwd_A_0 == 3'b010)      ex1_fwd_0_A = mem2_fw_data_0;
-        else if (fwd_A_0 == 3'b001)      ex1_fwd_0_A = wb_data_0;
-        else if (f1A_d2)                 ex1_fwd_0_A = inst1_wb_d2;
-        else if (f1A_d3)                 ex1_fwd_0_A = inst1_wb_d3;
-        else if (f1A_wb)                 ex1_fwd_0_A = wb_data_1;
-        else if (fwd_A_0_cross == 3'b100) ex1_fwd_0_A = br_fw_data_1;
-        else if (fwd_A_0_cross == 3'b011) ex1_fwd_0_A = mem1_fw_data_1;
-        else if (fwd_A_0_cross == 3'b010) ex1_fwd_0_A = mem2_fw_data_1;
-        else if (fwd_A_0_cross == 3'b001) ex1_fwd_0_A = inst1_wb_data;
-        else                             ex1_fwd_0_A = ex1_rs1_raw_0;
+        // === inst0 A: by depth: d1(BR-age) > self/cross BR > d2(MEM1-age) > self/cross MEM1 > d3(MEM2-age) > self/cross MEM2 > self/cross WB > regfile
+        if      (f1A_d1)                    ex1_fwd_0_A = inst1_wb_d1;      // inst1 d1 (~1 cycle)
+        else if (fwd_A_0 == 3'b100)         ex1_fwd_0_A = br_fw_data_0;     // self BR  (1 cycle)
+        else if (fwd_A_0_cross == 3'b100)   ex1_fwd_0_A = br_fw_data_1;     // cross BR (1 cycle)
+        else if (f1A_d2)                    ex1_fwd_0_A = inst1_wb_d2;      // inst1 d2 (~2 cycles)
+        else if (fwd_A_0 == 3'b011)         ex1_fwd_0_A = mem1_fw_data_0;   // self MEM1 (2 cycles)
+        else if (fwd_A_0_cross == 3'b011)   ex1_fwd_0_A = mem1_fw_data_1;   // cross MEM1 (2 cycles)
+        else if (f1A_d3)                    ex1_fwd_0_A = inst1_wb_d3;      // inst1 d3 (~3 cycles)
+        else if (fwd_A_0 == 3'b010)         ex1_fwd_0_A = mem2_fw_data_0;   // self MEM2 (3 cycles)
+        else if (fwd_A_0_cross == 3'b010)   ex1_fwd_0_A = mem2_fw_data_1;   // cross MEM2 (3 cycles)
+        else if (f1A_wb)                    ex1_fwd_0_A = wb_data_1;        // inst1 wb (~4 cycles)
+        else if (fwd_A_0 == 3'b001)         ex1_fwd_0_A = wb_data_0;        // self WB  (4 cycles)
+        else if (fwd_A_0_cross == 3'b001)   ex1_fwd_0_A = inst1_wb_data;    // cross WB (4 cycles)
+        else                                ex1_fwd_0_A = ex1_rs1_raw_0;
 
-        // inst0 B
-        if      (f1B_d1)                 ex1_fwd_0_B = inst1_wb_d1;
-        else if (fwd_B_0 == 3'b100)      ex1_fwd_0_B = br_fw_data_0;
-        else if (fwd_B_0 == 3'b011)      ex1_fwd_0_B = mem1_fw_data_0;
-        else if (fwd_B_0 == 3'b010)      ex1_fwd_0_B = mem2_fw_data_0;
-        else if (fwd_B_0 == 3'b001)      ex1_fwd_0_B = wb_data_0;
-        else if (f1B_d2)                 ex1_fwd_0_B = inst1_wb_d2;
-        else if (f1B_d3)                 ex1_fwd_0_B = inst1_wb_d3;
-        else if (f1B_wb)                 ex1_fwd_0_B = wb_data_1;
-        else if (fwd_B_0_cross == 3'b100) ex1_fwd_0_B = br_fw_data_1;
-        else if (fwd_B_0_cross == 3'b011) ex1_fwd_0_B = mem1_fw_data_1;
-        else if (fwd_B_0_cross == 3'b010) ex1_fwd_0_B = mem2_fw_data_1;
-        else if (fwd_B_0_cross == 3'b001) ex1_fwd_0_B = inst1_wb_data;
-        else                             ex1_fwd_0_B = ex1_rs2_raw_0;
+        // === inst0 B ===
+        if      (f1B_d1)                    ex1_fwd_0_B = inst1_wb_d1;
+        else if (fwd_B_0 == 3'b100)         ex1_fwd_0_B = br_fw_data_0;
+        else if (fwd_B_0_cross == 3'b100)   ex1_fwd_0_B = br_fw_data_1;
+        else if (f1B_d2)                    ex1_fwd_0_B = inst1_wb_d2;
+        else if (fwd_B_0 == 3'b011)         ex1_fwd_0_B = mem1_fw_data_0;
+        else if (fwd_B_0_cross == 3'b011)   ex1_fwd_0_B = mem1_fw_data_1;
+        else if (f1B_d3)                    ex1_fwd_0_B = inst1_wb_d3;
+        else if (fwd_B_0 == 3'b010)         ex1_fwd_0_B = mem2_fw_data_0;
+        else if (fwd_B_0_cross == 3'b010)   ex1_fwd_0_B = mem2_fw_data_1;
+        else if (f1B_wb)                    ex1_fwd_0_B = wb_data_1;
+        else if (fwd_B_0 == 3'b001)         ex1_fwd_0_B = wb_data_0;
+        else if (fwd_B_0_cross == 3'b001)   ex1_fwd_0_B = inst1_wb_data;
+        else                                ex1_fwd_0_B = ex1_rs2_raw_0;
 
-        // inst1 A: inter-inst > inst1 self d1 > inst0 pipe > inst1 older > inst1 pipeline > regfile
-        if      (inst0_to_inst1_A)       ex1_fwd_1_A = ex1_alu_res_0;
-        else if (f1A_self_d1)            ex1_fwd_1_A = inst1_wb_d1;
-        else if (fwd_A_1_cross == 3'b100) ex1_fwd_1_A = br_fw_data_0;
-        else if (fwd_A_1_cross == 3'b011) ex1_fwd_1_A = mem1_fw_data_0;
-        else if (fwd_A_1_cross == 3'b010) ex1_fwd_1_A = mem2_fw_data_0;
-        else if (fwd_A_1_cross == 3'b001) ex1_fwd_1_A = wb_data_0;
-        else if (f1A_self_d2)            ex1_fwd_1_A = inst1_wb_d2;
-        else if (f1A_self_d3)            ex1_fwd_1_A = inst1_wb_d3;
-        else if (f1A_self_wb)            ex1_fwd_1_A = wb_data_1;
-        else if (fwd_A_1_self == 3'b100)  ex1_fwd_1_A = br_fw_data_1;
-        else if (fwd_A_1_self == 3'b011)  ex1_fwd_1_A = mem1_fw_data_1;
-        else if (fwd_A_1_self == 3'b010)  ex1_fwd_1_A = mem2_fw_data_1;
-        else if (fwd_A_1_self == 3'b001)  ex1_fwd_1_A = inst1_wb_data;
-        else                             ex1_fwd_1_A = ex1_rs1_raw_1;
+        // === inst1 A: same-cycle inst0 > d1 > cross/self BR > d2 > cross/self MEM1 > d3 > cross/self MEM2 > cross/self WB > regfile
+        if      (inst0_to_inst1_A)          ex1_fwd_1_A = ex1_alu_res_0;    // same-cycle inst0→inst1
+        else if (f1A_self_d1)               ex1_fwd_1_A = inst1_wb_d1;      // self d1 (~1 cycle)
+        else if (fwd_A_1_cross == 3'b100)   ex1_fwd_1_A = br_fw_data_0;     // cross BR (1 cycle)
+        else if (fwd_A_1_self == 3'b100)    ex1_fwd_1_A = br_fw_data_1;     // self BR  (1 cycle)
+        else if (f1A_self_d2)               ex1_fwd_1_A = inst1_wb_d2;      // self d2 (~2 cycles)
+        else if (fwd_A_1_cross == 3'b011)   ex1_fwd_1_A = mem1_fw_data_0;   // cross MEM1 (2 cycles)
+        else if (fwd_A_1_self == 3'b011)    ex1_fwd_1_A = mem1_fw_data_1;   // self MEM1 (2 cycles)
+        else if (f1A_self_d3)               ex1_fwd_1_A = inst1_wb_d3;      // self d3 (~3 cycles)
+        else if (fwd_A_1_cross == 3'b010)   ex1_fwd_1_A = mem2_fw_data_0;   // cross MEM2 (3 cycles)
+        else if (fwd_A_1_self == 3'b010)    ex1_fwd_1_A = mem2_fw_data_1;   // self MEM2 (3 cycles)
+        else if (f1A_self_wb)               ex1_fwd_1_A = wb_data_1;        // self wb (~4 cycles)
+        else if (fwd_A_1_cross == 3'b001)   ex1_fwd_1_A = wb_data_0;        // cross WB (4 cycles)
+        else if (fwd_A_1_self == 3'b001)    ex1_fwd_1_A = inst1_wb_data;    // self WB  (4 cycles)
+        else                                ex1_fwd_1_A = ex1_rs1_raw_1;
 
-        // inst1 B
-        if      (inst0_to_inst1_B)       ex1_fwd_1_B = ex1_alu_res_0;
-        else if (f1B_self_d1)            ex1_fwd_1_B = inst1_wb_d1;
-        else if (fwd_B_1_cross == 3'b100) ex1_fwd_1_B = br_fw_data_0;
-        else if (fwd_B_1_cross == 3'b011) ex1_fwd_1_B = mem1_fw_data_0;
-        else if (fwd_B_1_cross == 3'b010) ex1_fwd_1_B = mem2_fw_data_0;
-        else if (fwd_B_1_cross == 3'b001) ex1_fwd_1_B = wb_data_0;
-        else if (f1B_self_d2)            ex1_fwd_1_B = inst1_wb_d2;
-        else if (f1B_self_d3)            ex1_fwd_1_B = inst1_wb_d3;
-        else if (f1B_self_wb)            ex1_fwd_1_B = wb_data_1;
-        else if (fwd_B_1_self == 3'b100)  ex1_fwd_1_B = br_fw_data_1;
-        else if (fwd_B_1_self == 3'b011)  ex1_fwd_1_B = mem1_fw_data_1;
-        else if (fwd_B_1_self == 3'b010)  ex1_fwd_1_B = mem2_fw_data_1;
-        else if (fwd_B_1_self == 3'b001)  ex1_fwd_1_B = inst1_wb_data;
-        else                             ex1_fwd_1_B = ex1_rs2_raw_1;
+        // === inst1 B ===
+        if      (inst0_to_inst1_B)          ex1_fwd_1_B = ex1_alu_res_0;
+        else if (f1B_self_d1)               ex1_fwd_1_B = inst1_wb_d1;
+        else if (fwd_B_1_cross == 3'b100)   ex1_fwd_1_B = br_fw_data_0;
+        else if (fwd_B_1_self == 3'b100)    ex1_fwd_1_B = br_fw_data_1;
+        else if (f1B_self_d2)               ex1_fwd_1_B = inst1_wb_d2;
+        else if (fwd_B_1_cross == 3'b011)   ex1_fwd_1_B = mem1_fw_data_0;
+        else if (fwd_B_1_self == 3'b011)    ex1_fwd_1_B = mem1_fw_data_1;
+        else if (f1B_self_d3)               ex1_fwd_1_B = inst1_wb_d3;
+        else if (fwd_B_1_cross == 3'b010)   ex1_fwd_1_B = mem2_fw_data_0;
+        else if (fwd_B_1_self == 3'b010)    ex1_fwd_1_B = mem2_fw_data_1;
+        else if (f1B_self_wb)               ex1_fwd_1_B = wb_data_1;
+        else if (fwd_B_1_cross == 3'b001)   ex1_fwd_1_B = wb_data_0;
+        else if (fwd_B_1_self == 3'b001)    ex1_fwd_1_B = inst1_wb_data;
+        else                                ex1_fwd_1_B = ex1_rs2_raw_1;
     end
     wire [31:0] inst1_rs1_final = ex1_fwd_1_A;  // inst0→inst1 now handled inside always_comb
     wire [31:0] inst1_rs2_final = ex1_fwd_1_B;
