@@ -97,6 +97,16 @@ module myCPU (
     // hd_flush_RF_EX1_0/1 driven by HDU instances below
     assign br_flush       = br_take_trap | br_mispredict_0 | br_mispredict_1;
 
+    // inst1_seq_wrong: inst1 at PC+4 is on wrong path. True when:
+    //   trap → always wrong
+    //   inst0 mispredict AND (branch actually taken OR inst0 is not a branch):
+    //     - actual taken → sequential path wrong → kill inst1
+    //     - not a branch → BHT aliasing → frontend will re-fetch PC+4 → kill inst1 to avoid duplicate
+    //   inst1 mispredict → inst1 path wrong
+    // False ONLY when: inst0 IS a branch, mispredicted, and actually NOT-taken
+    //   → sequential path is correct (pred-T/actual-NT), keep inst1.
+    wire inst1_seq_wrong = br_take_trap | (br_mispredict_0 & (br_actual_taken | ~br_is_ctrl)) | br_mispredict_1;
+
     // 分布式拦截拓扑关系映射
     // early_flush: RF 级提前解析, 冲刷 F1→ID (比 BR 级提前 2 拍)
     assign poison_F1_F4   = br_flush | f5_micro_flush;
@@ -105,9 +115,10 @@ module myCPU (
     assign poison_ID      = br_flush;
     assign poison_RF      = br_flush;
     assign poison_EX1_0   = br_flush | hd_flush_RF_EX1_0;
-    assign poison_EX1_1   = br_flush | hd_flush_RF_EX1_1;
+    // inst1 poisons use inst1_seq_wrong: killed only when sequential path is wrong
+    assign poison_EX1_1   = inst1_seq_wrong | hd_flush_RF_EX1_1;
     assign poison_BR_0    = stall_EX1 | br_flush;
-    assign poison_BR_1    = stall_EX1 | br_flush;
+    assign poison_BR_1    = inst1_seq_wrong;
     // 后端乘除法阻塞或发生全局冲刷时，就地截断并转化为 NOP 气泡，彻底防止 EX1 阶段的推测性指令逃逸至 BR
 
     // =========================================================================
@@ -486,10 +497,9 @@ module myCPU (
     wire inst0_ctrl = id_IsBranch_0 || (id_JmpType_0 != 2'b00) || id_IsEcall_0 || id_IsEbreak_0 || id_IsMret_0;
     wire inst1_ctrl = id_IsBranch_1 || (id_JmpType_1 != 2'b00) || id_IsEcall_1 || id_IsEbreak_1 || id_IsMret_1;
 
-    // Safe baseline: keep inst1 restricted to simple ALU.
-    // Full symmetric dual-issue requires connecting inst1 WB to new pipeline registers
-    // (currently shift register only captures ALU result, can't handle load data).
-    wire can_dual = id_valid_1 && inst1_simple_alu && !waw_conflict && !load_use_0_to_1 && !raw_1_to_0 && pc_adjacent && !inst0_ctrl;
+    // Remove inst0_ctrl: inst0 can be branch in dual-issue.
+    // inst1_seq_wrong correctly handles pred-T/actual-NT (keep inst1) vs pred-NT/actual-T (kill inst1).
+    wire can_dual = id_valid_1 && inst1_simple_alu && !waw_conflict && !load_use_0_to_1 && !raw_1_to_0 && pc_adjacent;
     assign dual_pop_count = can_dual ? 2'd2 : (id_valid_0 ? 2'd1 : 2'd0);
 
     // =========================================================================
@@ -895,7 +905,7 @@ module myCPU (
     logic [4:0] br_rd_1; logic br_RegWen_1;
 
     EX1_BR_Reg #(DATAWIDTH) ex1_br_1 (
-        .clk(cpu_clk), .rst(cpu_rst), .stall(1'b0), .poison(poison_BR_1),
+        .clk(cpu_clk), .rst(cpu_rst), .stall(stall_EX1), .poison(poison_BR_1),
         .ex1_valid(ex1_valid_1), .ex1_pc(ex1_pc_1), .ex1_inst(ex1_inst_1),
         .ex1_ret_pc(ex1_ret_pc_1), .ex1_branch_target(ex1_br_tgt_1),
         .ex1_alu_res(final_alu_1), .ex1_fw_rs1_data(ex1_fwd_1_A),
@@ -1129,23 +1139,21 @@ module myCPU (
         .wb_WbSel(wb_WbSel_1_pipe), .wb_rd(wb_rd_1_pipe), .wb_RegWen(wb_RegWen_1_pipe)
     );
 
-    // WB inst1: 4-cycle shift register matching inst0 EX1→BR→MEM1→MEM2→WB
+    // WB inst1: 4-cycle shift register (d1/d2/d3 for forwarding only, WB from pipeline regs)
     // inst1_d1_en blocks new captures during br_flush (same as EX1_BR_Reg poison_BR)
-    // d1→d2 killed only when inst0 branch is ACTUALLY taken (sequential path wrong)
     logic [31:0] inst1_wb_d1, inst1_wb_d2, inst1_wb_d3, inst1_wb_data;
-    logic [31:0] inst1_wb_pc_d1, inst1_wb_pc_d2, inst1_wb_pc_d3, wb_pc_1;
-    logic [4:0]  inst1_wb_rd_d1, inst1_wb_rd_d2, inst1_wb_rd_d3, inst1_wb_rd;
-    logic        inst1_wb_rw_d1, inst1_wb_rw_d2, inst1_wb_rw_d3, inst1_wb_RegWen;
-    logic        inst1_wb_v_d1, inst1_wb_v_d2, inst1_wb_v_d3, wb_valid_1;
+    logic [31:0] inst1_wb_pc_d1, inst1_wb_pc_d2, inst1_wb_pc_d3;
+    logic [4:0]  inst1_wb_rd_d1, inst1_wb_rd_d2, inst1_wb_rd_d3;
+    logic        inst1_wb_rw_d1, inst1_wb_rw_d2, inst1_wb_rw_d3;
+    logic        inst1_wb_v_d1, inst1_wb_v_d2, inst1_wb_v_d3;
     wire         inst1_d1_en = ~stall_EX1 & ~br_flush;
     always_ff @(posedge cpu_clk) begin
         if (cpu_rst) begin
-            inst1_wb_v_d1 <= 0; inst1_wb_v_d2 <= 0; inst1_wb_v_d3 <= 0; wb_valid_1 <= 0;
+            inst1_wb_v_d1 <= 0; inst1_wb_v_d2 <= 0; inst1_wb_v_d3 <= 0;
         end else begin
             inst1_wb_v_d1 <= ex1_valid_1 & ex1_RegWen_1 & inst1_d1_en;
-            inst1_wb_v_d2 <= inst1_wb_v_d1 & ~br_flush;
+            inst1_wb_v_d2 <= inst1_wb_v_d1 & ~inst1_seq_wrong;
             inst1_wb_v_d3 <= inst1_wb_v_d2;
-            wb_valid_1    <= inst1_wb_v_d3;
             if (inst1_d1_en) begin
                 inst1_wb_d1 <= ex1_alu_res_1;
                 inst1_wb_pc_d1 <= ex1_pc_1;
@@ -1153,14 +1161,34 @@ module myCPU (
                 inst1_wb_rw_d1 <= ex1_RegWen_1;
             end
             inst1_wb_d2 <= inst1_wb_d1; inst1_wb_d3 <= inst1_wb_d2; inst1_wb_data <= inst1_wb_d3;
-            inst1_wb_pc_d2 <= inst1_wb_pc_d1; inst1_wb_pc_d3 <= inst1_wb_pc_d2; wb_pc_1 <= inst1_wb_pc_d3;
-            inst1_wb_rd_d2 <= inst1_wb_rd_d1; inst1_wb_rd_d3 <= inst1_wb_rd_d2; inst1_wb_rd <= inst1_wb_rd_d3;
-            inst1_wb_rw_d2 <= inst1_wb_rw_d1; inst1_wb_rw_d3 <= inst1_wb_rw_d2; inst1_wb_RegWen <= inst1_wb_rw_d3;
+            inst1_wb_pc_d2 <= inst1_wb_pc_d1; inst1_wb_pc_d3 <= inst1_wb_pc_d2;
+            inst1_wb_rd_d2 <= inst1_wb_rd_d1; inst1_wb_rd_d3 <= inst1_wb_rd_d2;
+            inst1_wb_rw_d2 <= inst1_wb_rw_d1; inst1_wb_rw_d3 <= inst1_wb_rw_d2;
         end
     end
-    assign wb_data_1 = inst1_wb_data;
-    assign wb_RegWen_1 = inst1_wb_RegWen;
-    assign wb_rd_1   = inst1_wb_rd;
+    // Shift register WB data (for forwarding, matches pipeline reg output for ALU ops)
+    // Pipeline reg WB is the authoritative source for commits.
+
+    // === inst1 WB byte alignment (from pipeline registers) ===
+    logic [7:0] wb_byte_1; logic [15:0] wb_half_1; logic [31:0] wb_ext_1;
+    always_comb begin
+        case(wb_agu_lo_1_pipe) 2'b00: wb_byte_1 = wb_prdata_1_pipe[ 7: 0]; 2'b01: wb_byte_1 = wb_prdata_1_pipe[15: 8];
+            2'b10: wb_byte_1 = wb_prdata_1_pipe[23:16]; 2'b11: wb_byte_1 = wb_prdata_1_pipe[31:24]; endcase
+        wb_half_1 = wb_agu_lo_1_pipe[1] ? wb_prdata_1_pipe[31:16] : wb_prdata_1_pipe[15:0];
+        case(wb_funct3_1_pipe) 3'b000: wb_ext_1 = {{24{wb_byte_1[7]}}, wb_byte_1}; 3'b100: wb_ext_1 = {24'b0, wb_byte_1};
+            3'b001: wb_ext_1 = {{16{wb_half_1[15]}}, wb_half_1}; 3'b101: wb_ext_1 = {16'b0, wb_half_1}; default: wb_ext_1 = wb_prdata_1_pipe; endcase
+    end
+    // inst1 WB data MUX (same as inst0: load data vs non-load data)
+    wire [31:0] wb_data_1_pipe_muxed = (wb_WbSel_1_pipe == 2'b10) ? wb_ext_1 : wb_nd_1_pipe;
+
+    // === Commit signals: inst1 WB from pipeline registers ===
+    logic wb_valid_1;
+    logic [31:0] wb_pc_1;
+    assign wb_valid_1  = wb_valid_1_pipe;
+    assign wb_pc_1     = wb_pc_1_pipe;
+    assign wb_RegWen_1 = wb_RegWen_1_pipe;
+    assign wb_rd_1     = wb_rd_1_pipe;
+    assign wb_data_1   = wb_data_1_pipe_muxed;
 
     // WB byte alignment (仅 inst0 loads)
     logic [7:0] wb_byte; logic [15:0] wb_half; logic [31:0] wb_ext;

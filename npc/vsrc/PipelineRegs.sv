@@ -237,6 +237,7 @@ module EX1_BR_Reg #(parameter DATAWIDTH = 32)(
     always_ff @(posedge clk) begin
         if (rst || poison) br_valid <= 1'b0;
         else if (!stall)   br_valid <= ex1_valid;
+        else               br_valid <= 1'b0;  // clear during stall: prevent duplicate BR→MEM1 captures
     end
     always_ff @(posedge clk) begin
         if (!stall && !poison) begin
