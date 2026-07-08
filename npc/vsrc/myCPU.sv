@@ -486,7 +486,9 @@ module myCPU (
     wire inst0_ctrl = id_IsBranch_0 || (id_JmpType_0 != 2'b00) || id_IsEcall_0 || id_IsEbreak_0 || id_IsMret_0;
     wire inst1_ctrl = id_IsBranch_1 || (id_JmpType_1 != 2'b00) || id_IsEcall_1 || id_IsEbreak_1 || id_IsMret_1;
 
-    // Revert to safe can_dual for infrastructure testing
+    // Safe baseline: keep inst1 restricted to simple ALU.
+    // Full symmetric dual-issue requires connecting inst1 WB to new pipeline registers
+    // (currently shift register only captures ALU result, can't handle load data).
     wire can_dual = id_valid_1 && inst1_simple_alu && !waw_conflict && !load_use_0_to_1 && !raw_1_to_0 && pc_adjacent && !inst0_ctrl;
     assign dual_pop_count = can_dual ? 2'd2 : (id_valid_0 ? 2'd1 : 2'd0);
 
