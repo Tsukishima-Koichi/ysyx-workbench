@@ -5,6 +5,13 @@
 #include "memory.h"
 #include "difftest.h"
 #include "monitor.h"
+#include "svdpi.h"
+
+// Performance counter DPI (from cpu.sv)
+extern "C" void perf_get_counters(
+    int* commits, int* branches, int* mispredicts,
+    int* stall_front, int* stall_back
+);
 
 // // 宏定义最好统一移到 Makefile，这里仅作演示保留
 // #define GEN_WAVEFORM 
@@ -107,6 +114,30 @@ int main(int argc, char** argv) {
             break; 
         }
         #endif
+    }
+
+    // ==========================================
+    //  Performance Summary
+    // ==========================================
+    {
+        int p_commits, p_branches, p_mispredicts, p_stall_f, p_stall_b;
+        svSetScope(svGetScopeFromName("TOP.cpu"));
+        perf_get_counters(&p_commits, &p_branches, &p_mispredicts, &p_stall_f, &p_stall_b);
+
+        printf("\n========== Performance Summary ==========\n");
+        printf("Cycles:              %u\n", cycles);
+        printf("Committed Insns:     %d\n", p_commits);
+        if (cycles > 0) printf("IPC:                 %.4f\n", (float)p_commits / cycles);
+        if (p_branches > 0) {
+            printf("Branches/Jumps:      %d\n", p_branches);
+            printf("Mispredicts:         %d\n", p_mispredicts);
+            printf("Branch Accuracy:     %.2f%%\n", 100.0 * (p_branches - p_mispredicts) / p_branches);
+        }
+        if (cycles > 0) {
+            printf("Frontend Stalls:     %d cyc (%.1f%%)\n", p_stall_f, 100.0 * p_stall_f / cycles);
+            printf("Backend Stalls:      %d cyc (%.1f%%)\n",  p_stall_b, 100.0 * p_stall_b / cycles);
+        }
+        printf("==========================================\n");
     }
 
 sim_end:

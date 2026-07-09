@@ -25,6 +25,7 @@ module Control(
     assign funct3  = inst[14:12];
     assign funct12 = inst[31:20];
 
+    // 🌟 修复：必须使用 wire 才能生成连续赋值的硬件连线！
     wire is_R    = (opcode === `R_TYPE);
     wire is_I    = (opcode === `I_TYPE);
     wire is_L    = (opcode === `IL_TYPE);
@@ -41,10 +42,12 @@ module Control(
     wire is_sys_mret   = is_CSR & (funct3 === 3'b000) & (funct12 === 12'h302);
     wire is_csr_rw     = is_CSR & (funct3 !== 3'b000);
 
+    // 🌟 后续组合逻辑保持不变
     assign IsBranch = is_B;
     assign MemWen   = is_S;
-    assign RegWen   = is_R | is_I | is_L | is_U | is_UA | is_J | is_IJ | is_csr_rw;
     
+    assign RegWen   = is_R | is_I | is_L | is_U | is_UA | is_J | is_IJ | is_csr_rw;
+
     assign JmpType[1] = is_IJ | is_sys_call | is_sys_break | is_sys_mret;
     assign JmpType[0] = is_J  | is_sys_call | is_sys_break | is_sys_mret;
 
@@ -58,7 +61,7 @@ module Control(
 
     assign CsrWen    = is_csr_rw;
     assign CsrImmSel = funct3[2];
-    assign CsrOp[1]  = (funct3[1:0] == 2'b11);
+    assign CsrOp[1]  = (funct3[1:0] == 2'b11); 
     assign CsrOp[0]  = (funct3[1:0] == 2'b10); 
     
     assign IsEcall   = is_sys_call;

@@ -18,7 +18,7 @@ $(shell mkdir -p $(BUILD_DIR))
 # ============================================================================
 
 # 自动递归搜索 vsrc 目录下所有的 .v (Verilog) 和 .sv (SystemVerilog) 源文件
-VSRCS = $(shell find $(abspath ./vsrc) -name "*.v" -or -name "*.sv")
+VSRCS = $(shell find $(abspath ./vsrc) -name "*.v" -or -name "*.sv" | grep -v '_bak')
 
 # 自动递归搜索 csrc 目录下所有的 C/C++ 测试平台源文件
 CSRCS = $(shell find $(abspath ./csrc) -name "*.c" -or -name "*.cc" -or -name "*.cpp")
@@ -61,10 +61,11 @@ endif
 # -MMD --build -cc: 自动构建依赖并调用 GCC 编译成二进制
 # -O3: 开启最高优化
 # -I$(INC_PATH): 🌟 告诉 Verilator 去哪里找 `include 的文件
-VERILATOR_CFLAGS += -Wall --sv -MMD --build -cc -O3 \
+VERILATOR_CFLAGS += -Wall -Wno-fatal --sv -MMD --build -cc -O3 \
 					--trace \
                     --x-assign fast --x-initial fast \
                     -I$(INC_PATH) \
+					+define+NPC_TEST \
 					-Wno-DECLFILENAME \
                     -Wno-UNUSEDSIGNAL \
 					-Wno-PROCASSINIT \

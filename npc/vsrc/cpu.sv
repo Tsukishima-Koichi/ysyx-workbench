@@ -2,6 +2,7 @@
 `timescale 1ns / 1ps
 `include "defines.sv"
 
+// 导入 C++ 中的内存读写函数
 import "DPI-C" context function int pmem_read(input int raddr);
 import "DPI-C" context function void pmem_write(input int waddr, input int wdata, input byte wmask);
 
@@ -13,16 +14,15 @@ module cpu(
     output logic [31:0] inst,
     output logic        halt_req,
     output logic        dead_loop,
-    output logic [31:0] halt_pc,     
+    output logic [31:0] halt_pc,     // 🌟 新增：专门导出死循环时的 PC
 
-    output logic        commit_valid,
-    output logic [31:0] commit_pc,
-    // 双发射第二条指令提交
-    output logic        commit_valid_1,
-    output logic [31:0] commit_pc_1
+    // 🌟 新增：给 DiffTest 用的“指令提交”探针
+    output logic        commit_valid, 
+    output logic [31:0] commit_pc
 );
+    // 线缆声明
     logic [31:0] irom_addr;
-    logic [63:0] irom_data; // 升级为 64-bit 双字数据总线
+    logic [31:0] irom_data;
     
     logic [31:0] perip_addr;
     logic        perip_wen;
@@ -30,22 +30,22 @@ module cpu(
     logic [31:0] perip_wdata;
     logic [31:0] perip_rdata;
 
+    // 例化核心流水线
     myCPU u_myCPU (
         .cpu_rst      (rst),
         .cpu_clk      (clk),
         .irom_addr    (irom_addr),
-        .irom_data    (irom_data), // 接入 64-bit
+        .irom_data    (irom_data),
         .perip_addr   (perip_addr),
         .perip_wen    (perip_wen),
         .perip_mask   (perip_mask),
         .perip_wdata  (perip_wdata),
-        .perip_rdata  (perip_rdata),
-        .br_valid_out (br_valid_out),
-        .br_target_out(br_target_out)
+        .perip_rdata  (perip_rdata)
     );
-    logic br_valid_out;
-    logic [31:0] br_target_out;
 
+    // ====================================================
+    // 🌟 核心修复 1：BRAM 读特性模拟 (打一拍地址，延迟一周期出数据)
+    // ====================================================
     logic [31:0] irom_addr_reg;
     logic [31:0] perip_addr_reg;
 
@@ -54,43 +54,89 @@ module cpu(
             irom_addr_reg  <= 32'h8000_0000;
             perip_addr_reg <= 32'h0000_0000;
         end else begin
+            // 在时钟上升沿锁存 CPU 发出的地址
             irom_addr_reg  <= irom_addr;
             perip_addr_reg <= perip_addr;
         end
     end
 
+    // 组合逻辑根据锁存的地址向 C++ 读取数据
+    // 这样在外部看来，当前周期的 data 其实是上一周期地址的内容，完美契合 BRAM！
     always_comb begin
-        // 单周期调用两次 DPI-C 接口，模拟 64-bit 取指带宽以喂饱 F-Block
-        irom_data = {pmem_read(irom_addr + 4), pmem_read(irom_addr)};
+        irom_data   = pmem_read(irom_addr_reg);
         perip_rdata = pmem_read(perip_addr_reg);
     end
 
+    // ====================================================
+    // 🌟 核心修复 2：BRAM 写特性模拟 (同步写入)
+    // ====================================================
     always_ff @(posedge clk) begin
-        if (!rst && perip_wen)
+        if (!rst && perip_wen) begin
+            // 在时钟上升沿且写使能时，调用 C++ 写入数据
             pmem_write(perip_addr, perip_wdata, {4'b0, perip_mask});
+        end
     end
     
-    assign pc       = u_myCPU.ex1_pc;
+    // ====================================================
+    // 🌟 核心修复 3：修复 myCPU 内部信号引用错误及测试探针
+    // ====================================================
+    assign pc       = u_myCPU.ex_pc;
     assign inst     = u_myCPU.id_inst;     
-    assign halt_req = u_myCPU.ex1_IsEbreak;
-    
-    // dead_loop: J-type self-loop at EX1.  Gate with BR stage to prevent
-    // false positives when the paired instruction in the same 64-bit fetch
-    // (e.g. jal at pc_0) is at BR and about to redirect the PC away.
-    // If BR has a valid branch targeting a *different* address, the EX1
-    // instruction will be flushed — suppress dead_loop.
-    wire br_will_redirect_away = u_myCPU.br_valid_out &&
-         (u_myCPU.br_target_out != u_myCPU.ex1_pc) &&
-         (u_myCPU.br_target_out != 32'h0);  // BTB miss gives target=0
-    assign dead_loop = u_myCPU.ex1_valid &&
-                       (u_myCPU.ex1_JmpType == 2'b01) &&
-                       (u_myCPU.ex1_branch_target == u_myCPU.ex1_pc) &&
-                       ~br_will_redirect_away;
-    assign halt_pc = u_myCPU.ex1_pc;
+    assign halt_req = u_myCPU.ex_IsEbreak;
 
-    assign commit_valid   = u_myCPU.wb_valid;
-    assign commit_pc      = u_myCPU.wb_pc;
-    // 双发射第二个提交 (仅当 inst1 也写回时有效)
-    assign commit_valid_1 = u_myCPU.wb_valid_1;
-    assign commit_pc_1    = u_myCPU.wb_pc_1;
+    // 🌟 新增：精准检测程序是否正常结束 (通用版)
+    // 条件：
+    // 1. 指令有效 (免疫流水线气泡)
+    // 2. 是一条 JAL 指令
+    // 3. 它的跳转目标地址等于它自己当前的 PC (这就是 j . 死循环的本质！)
+    
+    assign dead_loop = u_myCPU.ex_valid && 
+                       (u_myCPU.ex_JmpType == 2'b01) && 
+                       (u_myCPU.ex_branch_target == u_myCPU.ex_pc);
+    assign halt_pc = u_myCPU.ex_pc;
+
+    // 🌟 将探针连向刚刚在 myCPU 里写好的 WB 阶段信号
+    assign commit_valid = u_myCPU.wb_valid;
+    assign commit_pc    = u_myCPU.wb_pc;
+
+    // ====================================================
+    // Performance Counters (IPC, Branch Accuracy, Stalls)
+    // ====================================================
+    logic [31:0] perf_commits;
+    logic [31:0] perf_branches;
+    logic [31:0] perf_mispredicts;
+    logic [31:0] perf_stall_front;
+    logic [31:0] perf_stall_back;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            perf_commits     <= 32'd0;
+            perf_branches    <= 32'd0;
+            perf_mispredicts <= 32'd0;
+            perf_stall_front <= 32'd0;
+            perf_stall_back  <= 32'd0;
+        end else begin
+            if (u_myCPU.wb_valid)
+                perf_commits <= perf_commits + 32'd1;
+            if (u_myCPU.ex_valid && u_myCPU.ex_is_jump_or_branch)
+                perf_branches <= perf_branches + 32'd1;
+            if (u_myCPU.ex_mispredict)
+                perf_mispredicts <= perf_mispredicts + 32'd1;
+            if (u_myCPU.stall_IF1)
+                perf_stall_front <= perf_stall_front + 32'd1;
+            if (u_myCPU.stall_EX)
+                perf_stall_back <= perf_stall_back + 32'd1;
+        end
+    end
+
+    export "DPI-C" function perf_get_counters;
+    function void perf_get_counters(output int commits, output int branches, output int mispredicts,
+                                     output int stall_front, output int stall_back);
+        commits     = perf_commits;
+        branches    = perf_branches;
+        mispredicts = perf_mispredicts;
+        stall_front = perf_stall_front;
+        stall_back  = perf_stall_back;
+    endfunction
+
 endmodule

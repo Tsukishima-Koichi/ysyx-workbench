@@ -99,4 +99,44 @@ module cpu(
     assign commit_valid = u_myCPU.wb_valid;
     assign commit_pc    = u_myCPU.wb_pc;
 
+    // ====================================================
+    // Performance Counters (IPC, Branch Accuracy, Stalls)
+    // ====================================================
+    logic [31:0] perf_commits;
+    logic [31:0] perf_branches;
+    logic [31:0] perf_mispredicts;
+    logic [31:0] perf_stall_front;
+    logic [31:0] perf_stall_back;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            perf_commits     <= 32'd0;
+            perf_branches    <= 32'd0;
+            perf_mispredicts <= 32'd0;
+            perf_stall_front <= 32'd0;
+            perf_stall_back  <= 32'd0;
+        end else begin
+            if (u_myCPU.wb_valid)
+                perf_commits <= perf_commits + 32'd1;
+            if (u_myCPU.ex_valid && u_myCPU.ex_is_jump_or_branch)
+                perf_branches <= perf_branches + 32'd1;
+            if (u_myCPU.ex_mispredict)
+                perf_mispredicts <= perf_mispredicts + 32'd1;
+            if (u_myCPU.stall_IF1)
+                perf_stall_front <= perf_stall_front + 32'd1;
+            if (u_myCPU.stall_EX)
+                perf_stall_back <= perf_stall_back + 32'd1;
+        end
+    end
+
+    export "DPI-C" function perf_get_counters;
+    function void perf_get_counters(output int commits, output int branches, output int mispredicts,
+                                     output int stall_front, output int stall_back);
+        commits     = perf_commits;
+        branches    = perf_branches;
+        mispredicts = perf_mispredicts;
+        stall_front = perf_stall_front;
+        stall_back  = perf_stall_back;
+    endfunction
+
 endmodule
