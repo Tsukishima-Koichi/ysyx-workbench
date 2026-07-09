@@ -75,34 +75,16 @@ VERILATOR_CFLAGS += -Wall --sv -MMD --build -cc -O3 \
 # ============================================================================
 # 4. 核心编译与运行规则
 # ============================================================================
-
-# 智能开关：是否加载默认的双文件镜像 (1: 开启, 0: 关闭)
-LOAD_DEFAULT_BIN ?= 1
-
-# [核心逻辑] 如果是被 AM 测试框架调用（框架会传入 ARGS 或 IMG），则自动强制关闭默认加载！
-ifdef ARGS
-    LOAD_DEFAULT_BIN = 0
-endif
-ifdef IMG
-    LOAD_DEFAULT_BIN = 0
-endif
-
-# 定义默认的 bin 文件路径和起始地址
+# 新增：定义默认的 bin 文件路径和起始地址 (?= 表示可被终端环境变量覆盖)
 IROM_BIN  ?= ./bin/withMext/irom.bin
 DRAM_BIN  ?= ./bin/withMext/dram.bin
 DRAM_ADDR ?= 80100000
-
-# 根据开关状态动态拼接传给 C++ 的运行参数
-ifeq ($(LOAD_DEFAULT_BIN), 1)
-    SIM_ARGS = -i $(IROM_BIN) -d $(DRAM_BIN) -a $(DRAM_ADDR)
-else
-    SIM_ARGS =
-endif
 
 # 默认目标设为 sim
 default: sim
 
 # 编译规则：生成最终的可执行二进制文件
+# 依赖于所有的 Verilog 和 C++ 文件
 $(BIN): $(VSRCS) $(CSRCS)
 	@echo "====== 1. Verilating and Compiling ======"
 	$(VERILATOR) $(VERILATOR_CFLAGS) \
@@ -110,19 +92,17 @@ $(BIN): $(VSRCS) $(CSRCS)
 		--Mdir $(OBJ_DIR) --exe -o $(abspath $(BIN))
 
 # 运行规则
+# $(IMG) 参数用于接收来自 AM 框架传进来的 .bin 镜像路径
 sim: $(BIN)
+	$(call git_commit, "sim RTL") # DO NOT REMOVE THIS LINE!!!
 	@echo "====== 2. Running Simulation ======"
-	$(BIN) $(SIM_ARGS) $(ARGS) $(IMG)
+	@$(BIN) $(IMG) -i $(IROM_BIN) -d $(DRAM_BIN) -a $(DRAM_ADDR)
 
-# ============================================================================
-# 5. 清理规则 (Clean)
-# ============================================================================
-# 声明伪目标，防止和同名文件冲突
-.PHONY: default sim clean run-all
-
+# 清理规则
 clean:
-	@echo "====== Cleaning Workspace ======"
 	rm -rf $(BUILD_DIR)
+
+.PHONY: default sim clean
 
 # ============================================================================
 # 5. 一生一芯全局追踪与依赖

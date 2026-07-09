@@ -4,8 +4,8 @@
 #include <stdio.h>
 
 void parse_args_and_load(int argc, char** argv) {
-    const char* irom_file = NULL; // 🌟 默认设为 NULL
-    const char* dram_file = NULL; // 🌟 默认设为 NULL
+    const char* irom_file = "./bin/test_src/irom.bin"; 
+    const char* dram_file = "./bin/test_src/dram.bin"; 
     uint32_t dram_addr = 0x80100000; 
 
     for (int i = 1; i < argc; i++) {
@@ -20,13 +20,9 @@ void parse_args_and_load(int argc, char** argv) {
         }
     }
     
-    // 初始化物理内存
+    // 初始化物理内存，然后加载镜像
     memset(pmem, 0, PMEM_SIZE);
-
-    // 🌟 如果指针非空（即 Makefile 传了参数），才进行加载
-    if (irom_file != NULL) {
-        load_image(irom_file, PMEM_BASE);           
-    }
+    load_image(irom_file, PMEM_BASE);           
     if (dram_file != NULL) {
         load_image(dram_file, dram_addr);       
     }

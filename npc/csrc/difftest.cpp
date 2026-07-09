@@ -5,6 +5,9 @@
 #include <assert.h>
 #include "svdpi.h"
 
+// ==========================================
+// DPI-C 作用域与获取函数 (无论是否开启 DiffTest 都需要)
+// ==========================================
 svScope regfile_scope = NULL;
 svScope csr_scope = NULL;
 
@@ -19,13 +22,15 @@ extern "C" int get_csr(int idx);
 #define DIFFTEST_TO_DUT 0
 #define DIFFTEST_TO_REF 1
 
+// 🌟 必须严格匹配 NEMU 内部导出的寄存器布局
 struct CPU_state {
     uint32_t gpr[32];
     uint32_t pc;
-    uint32_t mepc;
-    uint32_t mcause;
-    uint32_t mtvec;
-    uint32_t mstatus;
+
+    uint32_t mepc;    
+    uint32_t mcause;  
+    uint32_t mtvec;   
+    uint32_t mstatus; 
     uint32_t mscratch;
 };
 
@@ -52,11 +57,12 @@ void init_difftest() {
 
     assert(nemu_difftest_memcpy && nemu_difftest_regcpy && nemu_difftest_exec && nemu_difftest_init);
 
-    nemu_difftest_init();
-    nemu_difftest_memcpy(0x80000000, pmem, PMEM_SIZE, DIFFTEST_TO_REF);
+    nemu_difftest_init(); 
+    nemu_difftest_memcpy(0x80000000, pmem, PMEM_SIZE, DIFFTEST_TO_REF); 
 
     CPU_state initial_state = {0};
     initial_state.pc = 0x80000000;
+    // 与 RTL 中的 CSR 初始值保持一致！
     initial_state.mstatus = 0x1800;
     nemu_difftest_regcpy(&initial_state, DIFFTEST_TO_REF);
 }
@@ -67,6 +73,7 @@ bool difftest_check() {
     CPU_state ref_r;
     nemu_difftest_regcpy(&ref_r, DIFFTEST_TO_DUT);
 
+    // 1. 通用寄存器比对
     if (regfile_scope != NULL) {
         svSetScope(regfile_scope);
         for (int i = 0; i < 32; i++) {
@@ -78,7 +85,8 @@ bool difftest_check() {
             }
         }
     }
-
+    
+    // 2. CSR 状态寄存器比对
     if (csr_scope != NULL) {
         svSetScope(csr_scope);
         uint32_t dut_mstatus  = (uint32_t)get_csr(0x300);
@@ -112,20 +120,20 @@ bool difftest_check() {
             printf("DUT mscratch = 0x%08x | NEMU mscratch = 0x%08x\n", dut_mscratch, ref_r.mscratch);
             return false;
         }
-    }
+}
 
     difftest_check_pending = false;
     return true;
 }
 
-bool difftest_commit(uint32_t commit_pc, int slot) {
+bool difftest_commit(uint32_t commit_pc) {
     CPU_state ref_r;
     nemu_difftest_regcpy(&ref_r, DIFFTEST_TO_DUT);
 
     if (ref_r.pc != commit_pc) {
-        printf("\n\33[1;31m[DiffTest Error] PC Mismatch (slot=%d)!\33[0m\n", slot);
-        printf("DUT PC: 0x%08x | NEMU PC: 0x%08x (diff=%+d)\n", commit_pc, ref_r.pc, (int)(commit_pc - ref_r.pc));
-        return false;
+        printf("\n\33[1;31m[DiffTest Error] PC Mismatch!\33[0m\n");
+        printf("DUT PC: 0x%08x | NEMU PC: 0x%08x\n", commit_pc, ref_r.pc);
+        return false; 
     }
 
     nemu_difftest_exec(1);
@@ -134,14 +142,9 @@ bool difftest_commit(uint32_t commit_pc, int slot) {
     return true;
 }
 
-uint32_t difftest_get_nemu_pc() {
-    CPU_state ref_r;
-    nemu_difftest_regcpy(&ref_r, DIFFTEST_TO_DUT);
-    return ref_r.pc;
-}
-
 #else
+// 如果没有开启 NEMU_TRACE 宏，提供空实现兜底
 void init_difftest() {}
 bool difftest_check() { return true; }
-bool difftest_commit(uint32_t commit_pc, int slot) { return true; }
+bool difftest_commit(uint32_t commit_pc) { return true; }
 #endif
