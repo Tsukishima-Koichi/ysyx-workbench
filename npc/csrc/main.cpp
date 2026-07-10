@@ -12,6 +12,8 @@ extern "C" void perf_get_counters(
     int* commits, int* branches, int* mispredicts,
     int* stall_front, int* stall_back
 );
+// Extended counters from myCPU.sv
+extern "C" int get_perf_counter(int idx);
 
 // // 宏定义最好统一移到 Makefile，这里仅作演示保留
 // #define GEN_WAVEFORM 
@@ -124,6 +126,21 @@ int main(int argc, char** argv) {
         svSetScope(svGetScopeFromName("TOP.cpu"));
         perf_get_counters(&p_commits, &p_branches, &p_mispredicts, &p_stall_f, &p_stall_b);
 
+        // 从 myCPU 内部的 perf_counters 模块获取扩展计数器
+        svSetScope(svGetScopeFromName("TOP.cpu.u_myCPU.u_perf"));
+        int p_load_stall    = get_perf_counter(2);
+        int p_mdu_stall     = get_perf_counter(3);
+        int p_redirect      = get_perf_counter(4);
+        int p_lw_count      = get_perf_counter(5);
+        int p_lb_lh_count   = get_perf_counter(6);
+        int p_load_use_hzd  = get_perf_counter(7);
+        int p_wb_fwd_hits   = get_perf_counter(8);
+        int p_min_sp        = get_perf_counter(9);
+        int p_max_dram      = get_perf_counter(10);
+        int p_pred_bubble   = get_perf_counter(11);
+
+        int p_total_loads   = p_lw_count + p_lb_lh_count;
+
         printf("\n========== Performance Summary ==========\n");
         printf("Cycles:              %u\n", cycles);
         printf("Committed Insns:     %d\n", p_commits);
@@ -133,10 +150,34 @@ int main(int argc, char** argv) {
             printf("Mispredicts:         %d\n", p_mispredicts);
             printf("Branch Accuracy:     %.2f%%\n", 100.0 * (p_branches - p_mispredicts) / p_branches);
         }
+        printf("------------------------------------------\n");
+        printf("--- Stall Breakdown ---\n");
         if (cycles > 0) {
             printf("Frontend Stalls:     %d cyc (%.1f%%)\n", p_stall_f, 100.0 * p_stall_f / cycles);
             printf("Backend Stalls:      %d cyc (%.1f%%)\n",  p_stall_b, 100.0 * p_stall_b / cycles);
+            printf("Load-Use Stalls:     %d cyc (%.1f%%)\n", p_load_stall, 100.0 * p_load_stall / cycles);
+            printf("MDU Stalls:          %d cyc (%.1f%%)\n", p_mdu_stall, 100.0 * p_mdu_stall / cycles);
+            printf("Redirect Flushes:    %d cyc (%.1f%%)\n", p_redirect, 100.0 * p_redirect / cycles);
+            printf("Pred-Taken Bubbles:  %d cyc (%.1f%%)\n", p_pred_bubble, 100.0 * p_pred_bubble / cycles);
         }
+        printf("------------------------------------------\n");
+        printf("--- Memory Profile ---\n");
+        printf("LW instructions:     %d\n", p_lw_count);
+        printf("LB/LH instructions:  %d\n", p_lb_lh_count);
+        printf("Total loads:         %d\n", p_total_loads);
+        printf("Load-Use hazards:    %d\n", p_load_use_hzd);
+        if (p_total_loads > 0)
+            printf("Load-Use rate:       %.1f%% of loads\n", 100.0 * p_load_use_hzd / p_total_loads);
+        printf("Min SP (x2):         0x%08x\n", p_min_sp);
+        printf("Max DRAM addr:       0x%08x", p_max_dram);
+        if (p_stall_f > 0 && p_load_stall > 0)
+            printf("  (stack=0x%x ~ 0x%x)", p_min_sp, p_max_dram);
+        printf("\n");
+        printf("------------------------------------------\n");
+        printf("--- Forwarding ---\n");
+        printf("WB forwarding hits:  %d\n", p_wb_fwd_hits);
+        if (p_commits > 0)
+            printf("Fwd rate:            %.1f%% of commits\n", 100.0 * p_wb_fwd_hits / p_commits);
         printf("==========================================\n");
     }
 

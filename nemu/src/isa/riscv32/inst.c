@@ -55,6 +55,92 @@ static void decode_operand(Decode *s, int *rd, word_t *src1, word_t *src2, word_
   }
 }
 
+// =================== B-Extension Helper Functions ====================
+// All operate on 32-bit unsigned integers (word_t == uint32_t for RV32)
+
+// Rotate right
+static inline word_t ror32(word_t x, word_t n) {
+  n &= 31;
+  return (x >> n) | (x << (32 - n));
+}
+
+// Rotate left
+static inline word_t rol32(word_t x, word_t n) {
+  n &= 31;
+  return (x << n) | (x >> (32 - n));
+}
+
+// Carry-less multiply (GF(2) polynomial multiplication) - return full 64-bit product
+static inline uint64_t clmul64(uint32_t a, uint32_t b) {
+  uint64_t product = 0;
+  for (int i = 0; i < 32; i++) {
+    if (b & (1u << i)) product ^= ((uint64_t)a) << i;
+  }
+  return product;
+}
+
+// clmul with reversed rs1 bits
+static inline uint32_t clmulr32(uint32_t a, uint32_t b) {
+  // clmulr returns prod[2*XLEN-2 : XLEN-1] = bits [62:31] for RV32
+  return (uint32_t)(clmul64(a, b) >> 31);
+}
+
+// OR-combine within bytes (orc.b)
+static inline uint32_t orcb32(uint32_t x) {
+  uint32_t result = 0;
+  for (int b = 0; b < 4; b++) {
+    uint32_t byte_val = (x >> (b * 8)) & 0xFF;
+    if (byte_val != 0) result |= (0xFFu << (b * 8));
+  }
+  return result;
+}
+
+// Bit-reverse within each byte (brev8)
+static inline uint32_t brev8_32(uint32_t x) {
+  uint32_t result = 0;
+  for (int b = 0; b < 4; b++) {
+    uint32_t byte_val = (x >> (b * 8)) & 0xFF;
+    uint32_t rev = 0;
+    for (int i = 0; i < 8; i++) {
+      rev = (rev << 1) | (byte_val & 1);
+      byte_val >>= 1;
+    }
+    result |= (rev << (b * 8));
+  }
+  return result;
+}
+
+// Byte-reverse (rev8)
+static inline uint32_t rev8_32(uint32_t x) {
+  return ((x & 0xFF) << 24) | ((x & 0xFF00) << 8) |
+         ((x & 0xFF0000) >> 8) | ((x >> 24) & 0xFF);
+}
+
+// xperm4: nibble-level permutation
+static inline uint32_t xperm4_32(uint32_t rs1, uint32_t rs2) {
+  uint32_t result = 0;
+  for (int i = 0; i < 8; i++) {
+    uint32_t idx = (rs2 >> (i * 4)) & 0xF;
+    uint32_t nibble = (rs1 >> (idx * 4)) & 0xF;
+    result |= (nibble << (i * 4));
+  }
+  return result;
+}
+
+// xperm8: byte-level permutation
+static inline uint32_t xperm8_32(uint32_t rs1, uint32_t rs2) {
+  uint32_t result = 0;
+  for (int i = 0; i < 4; i++) {
+    uint32_t idx = (rs2 >> (i * 8)) & 0xFF;
+    if (idx < 4) {
+      uint32_t byte_val = (rs1 >> (idx * 8)) & 0xFF;
+      result |= (byte_val << (i * 8));
+    }
+    // if idx >= 4, result byte remains 0
+  }
+  return result;
+}
+
 static int decode_exec(Decode *s) {
   s->dnpc = s->snpc;
 
@@ -218,6 +304,122 @@ static int decode_exec(Decode *s) {
     \
     s->dnpc = cpu.csr.mepc; \
   );
+
+  // ============================================================
+  // Zba: Address Generation Extension (funct7=0010000, OP=0110011)
+  // ============================================================
+  // sh1add rd, rs1, rs2 => rd = (rs1 << 1) + rs2
+  INSTPAT("0010000 ????? ????? 010 ????? 01100 11", sh1add , R, R(rd) = (src1 << 1) + src2);
+  // sh2add rd, rs1, rs2 => rd = (rs1 << 2) + rs2
+  INSTPAT("0010000 ????? ????? 100 ????? 01100 11", sh2add , R, R(rd) = (src1 << 2) + src2);
+  // sh3add rd, rs1, rs2 => rd = (rs1 << 3) + rs2
+  INSTPAT("0010000 ????? ????? 110 ????? 01100 11", sh3add , R, R(rd) = (src1 << 3) + src2);
+
+  // ============================================================
+  // Zbb: Basic Bit-manipulation — Logical with Negate (funct7=0100000, OP=0110011)
+  // ============================================================
+  // andn rd, rs1, rs2 => rd = rs1 & ~rs2
+  INSTPAT("0100000 ????? ????? 111 ????? 01100 11", andn   , R, R(rd) = src1 & ~src2);
+  // orn rd, rs1, rs2 => rd = rs1 | ~rs2
+  INSTPAT("0100000 ????? ????? 110 ????? 01100 11", orn    , R, R(rd) = src1 | ~src2);
+  // xnor rd, rs1, rs2 => rd = ~(rs1 ^ rs2)
+  INSTPAT("0100000 ????? ????? 100 ????? 01100 11", xnor   , R, R(rd) = ~(src1 ^ src2));
+
+  // ============================================================
+  // Zbb: Min/Max (funct7=0000101)
+  // ============================================================
+  // min  rd, rs1, rs2 => rd = min(signed)
+  INSTPAT("0000101 ????? ????? 100 ????? 01100 11", min    , R, R(rd) = ((sword_t)src1 < (sword_t)src2) ? src1 : src2);
+  // minu rd, rs1, rs2 => rd = min(unsigned)
+  INSTPAT("0000101 ????? ????? 101 ????? 01100 11", minu   , R, R(rd) = (src1 < src2) ? src1 : src2);
+  // max  rd, rs1, rs2 => rd = max(signed)
+  INSTPAT("0000101 ????? ????? 110 ????? 01100 11", max    , R, R(rd) = ((sword_t)src1 > (sword_t)src2) ? src1 : src2);
+  // maxu rd, rs1, rs2 => rd = max(unsigned)
+  INSTPAT("0000101 ????? ????? 111 ????? 01100 11", maxu   , R, R(rd) = (src1 > src2) ? src1 : src2);
+
+  // ============================================================
+  // Zbb: Rotate (funct7=0110000)
+  // ============================================================
+  // ror rd, rs1, rs2 => rd = rotate_right(rs1, rs2[4:0])
+  INSTPAT("0110000 ????? ????? 101 ????? 01100 11", ror    , R, R(rd) = ror32(src1, src2));
+  // rol rd, rs1, rs2 => rd = rotate_left(rs1, rs2[4:0])
+  INSTPAT("0110000 ????? ????? 001 ????? 01100 11", rol    , R, R(rd) = rol32(src1, src2));
+  // rori rd, rs1, shamt => rd = rotate_right(rs1, shamt)  [I-type, funct3=101]
+  INSTPAT("0110000 ????? ????? 101 ????? 00100 11", rori   , I, R(rd) = ror32(src1, imm & 0x1F));
+
+  // ============================================================
+  // Zbb: Count / Extend (I-type, funct3=001, funct7=0110000)
+  // ============================================================
+  // clz rd, rs1: count leading zeros
+  INSTPAT("0110000 00000 ????? 001 ????? 00100 11", clz    , I, { uint32_t x=src1; R(rd)=(x==0)?32:__builtin_clz(x); });
+  // ctz rd, rs1: count trailing zeros
+  INSTPAT("0110000 00001 ????? 001 ????? 00100 11", ctz    , I, { uint32_t x=src1; R(rd)=(x==0)?32:__builtin_ctz(x); });
+  // cpop rd, rs1: population count
+  INSTPAT("0110000 00010 ????? 001 ????? 00100 11", cpop   , I, R(rd) = __builtin_popcount(src1));
+  // sext.b rd, rs1: sign-extend byte
+  INSTPAT("0110000 00100 ????? 001 ????? 00100 11", sext_b , I, R(rd) = SEXT(BITS(src1, 7, 0), 8));
+  // sext.h rd, rs1: sign-extend halfword
+  INSTPAT("0110000 00101 ????? 001 ????? 00100 11", sext_h , I, R(rd) = SEXT(BITS(src1, 15, 0), 16));
+
+  // ============================================================
+  // Zbb: Byte-level operations (I-type, funct3=101)
+  // ============================================================
+  // orc.b rd, rs1: OR-combine within bytes
+  INSTPAT("0010100 00111 ????? 101 ????? 00100 11", orc_b  , I, R(rd) = orcb32(src1));
+  // rev8 rd, rs1: byte-reverse (grevi with control=24)
+  INSTPAT("0110100 11000 ????? 101 ????? 00100 11", rev8   , I, R(rd) = rev8_32(src1));
+
+  // ============================================================
+  // Zbc: Carry-less Multiplication (funct7=0000101, OP=0110011)
+  // ============================================================
+  // clmul  rd, rs1, rs2 => low 32 bits of carry-less product
+  INSTPAT("0000101 ????? ????? 001 ????? 01100 11", clmul  , R, R(rd) = (uint32_t)clmul64(src1, src2));
+  // clmulh rd, rs1, rs2 => high 32 bits of carry-less product
+  INSTPAT("0000101 ????? ????? 011 ????? 01100 11", clmulh , R, R(rd) = (uint32_t)(clmul64(src1, src2) >> 32));
+  // clmulr rd, rs1, rs2 => clmul with rs1 bits reversed
+  INSTPAT("0000101 ????? ????? 010 ????? 01100 11", clmulr , R, R(rd) = clmulr32(src1, src2));
+
+  // ============================================================
+  // Zbs: Single-bit Register (OP=0110011)
+  // ============================================================
+  // bset rd, rs1, rs2 => rd = rs1 | (1 << (rs2 & 31))
+  INSTPAT("0010100 ????? ????? 001 ????? 01100 11", bset   , R, R(rd) = src1 | (1u << (src2 & 0x1F)));
+  // bclr rd, rs1, rs2 => rd = rs1 & ~(1 << (rs2 & 31))
+  INSTPAT("0100100 ????? ????? 001 ????? 01100 11", bclr   , R, R(rd) = src1 & ~(1u << (src2 & 0x1F)));
+  // binv rd, rs1, rs2 => rd = rs1 ^ (1 << (rs2 & 31))
+  INSTPAT("0110100 ????? ????? 001 ????? 01100 11", binv   , R, R(rd) = src1 ^ (1u << (src2 & 0x1F)));
+  // bext rd, rs1, rs2 => rd = (rs1 >> (rs2 & 31)) & 1
+  INSTPAT("0100100 ????? ????? 101 ????? 01100 11", bext   , R, R(rd) = (src1 >> (src2 & 0x1F)) & 1);
+
+  // ============================================================
+  // Zbs: Single-bit Immediate (OP-IMM=0010011, shamt=bit index)
+  // ============================================================
+  // bseti rd, rs1, imm => rd = rs1 | (1 << shamt)
+  INSTPAT("0010100 ????? ????? 001 ????? 00100 11", bseti  , I, R(rd) = src1 | (1u << (imm & 0x1F)));
+  // bclri rd, rs1, imm => rd = rs1 & ~(1 << shamt)
+  INSTPAT("0100100 ????? ????? 001 ????? 00100 11", bclri  , I, R(rd) = src1 & ~(1u << (imm & 0x1F)));
+  // binvi rd, rs1, imm => rd = rs1 ^ (1 << shamt)
+  INSTPAT("0110100 ????? ????? 001 ????? 00100 11", binvi  , I, R(rd) = src1 ^ (1u << (imm & 0x1F)));
+  // bexti rd, rs1, imm => rd = (rs1 >> shamt) & 1
+  INSTPAT("0100100 ????? ????? 101 ????? 00100 11", bexti  , I, R(rd) = (src1 >> (imm & 0x1F)) & 1);
+
+  // ============================================================
+  // Zbkb: Crypto Bit-manipulation (OP=0110011)
+  // ============================================================
+  // pack rd, rs1, rs2 => rd = {rs2[15:0], rs1[15:0]}  (zext.h is pack rd,rs1,x0)
+  INSTPAT("0000100 ????? ????? 100 ????? 01100 11", pack   , R, R(rd) = ((src2 & 0xFFFF) << 16) | (src1 & 0xFFFF));
+  // packh rd, rs1, rs2 => rd = {rs2[7:0], rs1[7:0], rs2[7:0], rs1[7:0]}
+  INSTPAT("0000100 ????? ????? 111 ????? 01100 11", packh  , R, { word_t lo2=src2&0xFF, lo1=src1&0xFF; R(rd)=(lo2<<24)|(lo1<<16)|(lo2<<8)|lo1; });
+  // brev8 rd, rs1: bit-reverse within each byte
+  INSTPAT("0110100 00111 ????? 101 ????? 00100 11", brev8  , I, R(rd) = brev8_32(src1));
+
+  // ============================================================
+  // Zbkx: Crossbar Permutations (funct7=0010100, OP=0110011)
+  // ============================================================
+  // xperm4 rd, rs1, rs2: nibble-level permutation
+  INSTPAT("0010100 ????? ????? 010 ????? 01100 11", xperm4 , R, R(rd) = xperm4_32(src1, src2));
+  // xperm8 rd, rs1, rs2: byte-level permutation
+  INSTPAT("0010100 ????? ????? 100 ????? 01100 11", xperm8 , R, R(rd) = xperm8_32(src1, src2));
 
   // 请确保将 ecall 放在 inv (兜底的非法指令) 之前！
   INSTPAT("0000000 00000 00000 000 00000 11100 11", ecall  , N, s->dnpc = isa_raise_intr(11, s->pc));
