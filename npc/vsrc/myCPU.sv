@@ -591,176 +591,64 @@ module myCPU (
     );
     
 
-    `ifdef NPC_TEST
-    import "DPI-C" context function void set_csr_scope();
 
-    // ==========================================
-    // 🌟 终极修复：DiffTest 指令提交与 CSR 影子同步
-    // ==========================================
-    logic        mem1_valid, mem2_valid, wb_valid;
-    logic [31:0] mem1_pc,    mem2_pc,    wb_pc;
-
-    // --- 1. 计算 EX 阶段真正要写入 CSR 的值 ---
+`ifdef NPC_TEST
+    // ---- DiffTest CSR 组合逻辑 ----
     logic [31:0] ex_next_csr_val;
     always_comb begin
-        case(ex_CsrOp)
-            2'b00: ex_next_csr_val = ex_csr_wdata; // RW
-            2'b01: ex_next_csr_val = ex_csr_rdata | ex_csr_wdata; // RS
-            2'b10: ex_next_csr_val = ex_csr_rdata & ~ex_csr_wdata; // RC
+        case (ex_CsrOp)
+            2'b00: ex_next_csr_val = ex_csr_wdata;
+            2'b01: ex_next_csr_val = ex_csr_rdata | ex_csr_wdata;
+            2'b10: ex_next_csr_val = ex_csr_rdata & ~ex_csr_wdata;
             default: ex_next_csr_val = ex_csr_wdata;
         endcase
     end
 
-    // --- 2. 建立一条专供 DiffTest 的控制信号旁路流水线 ---
-    logic        mem1_csr_wen_diff, mem2_csr_wen_diff, wb_csr_wen_diff;
-    logic [11:0] mem1_csr_idx_diff, mem2_csr_idx_diff, wb_csr_idx_diff;
-    logic [31:0] mem1_csr_val_diff, mem2_csr_val_diff, wb_csr_val_diff;
-    logic        mem1_ecall_diff,   mem2_ecall_diff,   wb_ecall_diff;
-    logic        mem1_ebreak_diff,  mem2_ebreak_diff,  wb_ebreak_diff;
-    logic        mem1_mret_diff,    mem2_mret_diff,    wb_mret_diff;
+    // ---- 流水线提交探针 (由 difftest_hooks 驱动) ----
+    logic wb_valid;
+    logic [31:0] wb_pc;
 
-    always_ff @(posedge cpu_clk) begin
-        if (cpu_rst) begin
-            mem1_valid <= 0; mem2_valid <= 0; wb_valid <= 0;
-            mem1_pc <= 0; mem2_pc <= 0; wb_pc <= 0;
-            
-            mem1_csr_wen_diff <= 0; mem2_csr_wen_diff <= 0; wb_csr_wen_diff <= 0;
-            mem1_ecall_diff <= 0;   mem2_ecall_diff <= 0;   wb_ecall_diff <= 0;
-            mem1_ebreak_diff <= 0;  mem2_ebreak_diff <= 0;  wb_ebreak_diff <= 0;
-            mem1_mret_diff <= 0;    mem2_mret_diff <= 0;    wb_mret_diff <= 0;
-        end else begin
-            // 🌟 EX -> MEM1 
-            if (flush_EX_MEM1_net) begin
-                mem1_valid <= 1'b0;
-                mem1_csr_wen_diff <= 0;
-                mem1_ecall_diff   <= 0;
-                mem1_ebreak_diff  <= 0;
-                mem1_mret_diff    <= 0;
-            end else begin
-                mem1_valid <= ex_valid;
-                // 只有 ex_valid 时，操作才算数！
-                mem1_csr_wen_diff <= ex_valid & ex_actual_csr_wen;
-                mem1_ecall_diff   <= ex_valid & ex_IsEcall;
-                mem1_ebreak_diff  <= ex_valid & ex_IsEbreak;
-                mem1_mret_diff    <= ex_valid & ex_IsMret;
-                
-                mem1_csr_idx_diff <= ex_csr_idx;
-                mem1_csr_val_diff <= ex_next_csr_val;
-            end
-            mem1_pc <= ex_pc;
+    // ==========================================
+    // DiffTest 流水线提交追踪 (独立模块)
+    // ==========================================
+    difftest_hooks u_difftest (
+        .clk               (cpu_clk),
+        .rst               (cpu_rst),
+        .ex_valid          (ex_valid),
+        .ex_pc             (ex_pc),
+        .ex_IsEcall        (ex_IsEcall),
+        .ex_IsEbreak       (ex_IsEbreak),
+        .ex_IsMret         (ex_IsMret),
+        .ex_actual_csr_wen (ex_actual_csr_wen),
+        .ex_csr_idx        (ex_csr_idx),
+        .ex_next_csr_val   (ex_next_csr_val),
+        .flush_EX_MEM1     (flush_EX_MEM1_net),
+        .wb_valid          (wb_valid),
+        .wb_pc             (wb_pc)
+    );
 
-            // 🌟 MEM1 -> MEM2
-            mem2_valid <= mem1_valid;
-            mem2_pc    <= mem1_pc;
-            mem2_csr_wen_diff <= mem1_csr_wen_diff;
-            mem2_csr_idx_diff <= mem1_csr_idx_diff;
-            mem2_csr_val_diff <= mem1_csr_val_diff;
-            mem2_ecall_diff   <= mem1_ecall_diff;
-            mem2_ebreak_diff  <= mem1_ebreak_diff;
-            mem2_mret_diff    <= mem1_mret_diff;
-
-            // 🌟 MEM2 -> WB
-            wb_valid <= mem2_valid;
-            wb_pc    <= mem2_pc;
-            wb_csr_wen_diff   <= mem2_csr_wen_diff;
-            wb_csr_idx_diff   <= mem2_csr_idx_diff;
-            wb_csr_val_diff   <= mem2_csr_val_diff;
-            wb_ecall_diff     <= mem2_ecall_diff;
-            wb_ebreak_diff    <= mem2_ebreak_diff;
-            wb_mret_diff      <= mem2_mret_diff;
-        end
-    end
-
-    // Performance counters for simulation-only CPI triage.
-    logic [31:0] perf_cycles;
-    logic [31:0] perf_retired;
-    logic [31:0] perf_load_stall;
-    logic [31:0] perf_mdu_stall;
-    logic [31:0] perf_redirect_flush;
-
-    always_ff @(posedge cpu_clk) begin
-        if (cpu_rst) begin
-            perf_cycles         <= 32'd0;
-            perf_retired        <= 32'd0;
-            perf_load_stall     <= 32'd0;
-            perf_mdu_stall      <= 32'd0;
-            perf_redirect_flush <= 32'd0;
-        end else begin
-            perf_cycles <= perf_cycles + 32'd1;
-            if (wb_valid) perf_retired <= perf_retired + 32'd1;
-            if (load_use_flush_id_ex) perf_load_stall <= perf_load_stall + 32'd1;
-            if (stall_req_mdu) perf_mdu_stall <= perf_mdu_stall + 32'd1;
-            if (redirect_flush) perf_redirect_flush <= perf_redirect_flush + 32'd1;
-        end
-    end
-
-    export "DPI-C" function get_perf_counter;
-    function int get_perf_counter(input int idx);
-        case(idx)
-            0: return perf_cycles;
-            1: return perf_retired;
-            2: return perf_load_stall;
-            3: return perf_mdu_stall;
-            4: return perf_redirect_flush;
-            default: return 0;
-        endcase
-    endfunction
-
-    // --- 3. DiffTest 专属影子 CSR 寄存器 (由 WB 更新) ---
-    logic [31:0] diff_mstatus = 32'h1800;
-    logic [31:0] diff_mtvec   = 32'h0;
-    logic [31:0] diff_mscratch= 32'h0;
-    logic [31:0] diff_mepc    = 32'h0;
-    logic [31:0] diff_mcause  = 32'h0;
-
-    always_ff @(posedge cpu_clk) begin
-        if (cpu_rst) begin
-            diff_mstatus <= 32'h1800;
-            diff_mtvec   <= 32'h0;
-            diff_mscratch <= 32'h0;
-            diff_mepc    <= 32'h0;
-            diff_mcause  <= 32'h0;
-        end else begin
-            // 完全复刻硬件的时序，但延迟到了真正的提交阶段
-            if (wb_ecall_diff) begin
-                diff_mepc    <= wb_pc; // 精准保存发生 ecall 的指令 PC
-                diff_mcause  <= 32'h0000_000B;
-                diff_mstatus <= {diff_mstatus[31:13], 2'b11, diff_mstatus[10:8], diff_mstatus[3], diff_mstatus[6:4], 1'b0, diff_mstatus[2:0]};
-            end else if (wb_ebreak_diff) begin
-                diff_mepc    <= wb_pc;
-                diff_mcause  <= 32'h0000_0003;
-                diff_mstatus <= {diff_mstatus[31:13], 2'b11, diff_mstatus[10:8], diff_mstatus[3], diff_mstatus[6:4], 1'b0, diff_mstatus[2:0]};
-            end else if (wb_mret_diff) begin
-                diff_mstatus <= {diff_mstatus[31:13], 2'b00, diff_mstatus[10:8], 1'b1, diff_mstatus[6:4], diff_mstatus[7], diff_mstatus[2:0]};
-            end else if (wb_csr_wen_diff) begin
-                case(wb_csr_idx_diff)
-                    12'h300: diff_mstatus <= wb_csr_val_diff;
-                    12'h305: diff_mtvec   <= wb_csr_val_diff;
-                    12'h340: diff_mscratch <= wb_csr_val_diff;
-                    12'h341: diff_mepc    <= wb_csr_val_diff;
-                    12'h342: diff_mcause  <= wb_csr_val_diff;
-                    default: ;
-                endcase
-            end
-        end
-    end
-
-    // --- 4. 导出给 C++ 的接口 ---
-    export "DPI-C" function get_csr;
-    function int get_csr(input int idx);
-        case(idx)
-            32'h300: return diff_mstatus;
-            32'h305: return diff_mtvec;
-            32'h340: return diff_mscratch;
-            32'h341: return diff_mepc;
-            32'h342: return diff_mcause;
-            default: return 0;
-        endcase
-    endfunction
-
-    initial begin
-        set_csr_scope();
-    end
-    `endif
+    // ==========================================
+    // 性能计数器 (独立模块)
+    // ==========================================
+    perf_counters u_perf (
+        .clk                     (cpu_clk),
+        .rst                     (cpu_rst),
+        .wb_valid                (wb_valid),
+        .wb_WbSel                (wb_WbSel),
+        .wb_funct3               (wb_funct3),
+        .wb_rd                   (wb_rd),
+        .wb_RegWen               (wb_RegWen),
+        .wb_data                 (wb_data),
+        .ex_forward_A            (ex_forward_A),
+        .ex_forward_B            (ex_forward_B),
+        .load_use_flush_id_ex    (load_use_flush_id_ex),
+        .stall_req_mdu           (stall_req_mdu),
+        .redirect_flush          (redirect_flush),
+        .valid_if2_pred_taken    (valid_if2_pred_taken),
+        .stall_IF2               (stall_IF2),
+        .mem1_MemWen             (mem1_MemWen),
+        .mem1_agu_res            (mem1_agu_res)
+    );
+`endif
 
 endmodule
