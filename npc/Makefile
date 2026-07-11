@@ -5,8 +5,15 @@
 # 定义 Verilog 的顶层模块名称
 TOPNAME = cpu
 
-# 定义统一的构建输出目录
-BUILD_DIR = ./build
+# ---- CPU 核心选择 ----
+# 用法: make CORE=ori  或  make CORE=z_green
+# 可用核心: $(shell ls -d */cpu.sv 2>/dev/null | sed 's|/cpu.sv||')
+CORE ?= vsrc
+CORE_DIR := $(abspath ./$(CORE))
+$(if $(wildcard $(CORE_DIR)/cpu.sv),,$(error "Core '$(CORE)' not found at $(CORE_DIR)/ (expected cpu.sv)"))
+
+# 根据核心名称动态命名构建目录，避免不同核心的编译产物互相覆盖
+BUILD_DIR = ./build_$(CORE)
 OBJ_DIR = $(BUILD_DIR)/obj_dir
 BIN = $(BUILD_DIR)/$(TOPNAME)
 
@@ -17,14 +24,14 @@ $(shell mkdir -p $(BUILD_DIR))
 # 2. 源代码自动搜刮区
 # ============================================================================
 
-# 自动递归搜索 vsrc 目录下所有的 .v (Verilog) 和 .sv (SystemVerilog) 源文件
-VSRCS = $(shell find $(abspath ./vsrc) -name "*.v" -or -name "*.sv" | grep -v '_bak')
+# 自动递归搜索 CORE 目录下所有的 .v (Verilog) 和 .sv (SystemVerilog) 源文件
+VSRCS = $(shell find $(CORE_DIR) -name "*.v" -or -name "*.sv" | grep -v '_bak')
 
 # 自动递归搜索 csrc 目录下所有的 C/C++ 测试平台源文件
 CSRCS = $(shell find $(abspath ./csrc) -name "*.c" -or -name "*.cc" -or -name "*.cpp")
 
-# = [关键修改] = 显式定义包含目录，解决 `include "defines.sv" 找不到的问题
-INC_PATH = $(abspath ./vsrc)
+# 显式定义包含目录，解决 `include "defines.sv" 找不到的问题
+INC_PATH = $(CORE_DIR)
 
 # ============================================================================
 # 3. Verilator 编译参数配置区
@@ -99,11 +106,28 @@ sim: $(BIN)
 	@echo "====== 2. Running Simulation ======"
 	@$(BIN) $(IMG) -i $(IROM_BIN) -d $(DRAM_BIN) -a $(DRAM_ADDR)
 
-# 清理规则
+# 清理规则 — 只清理当前核心的构建产物
 clean:
 	rm -rf $(BUILD_DIR)
 
-.PHONY: default sim clean
+# 清理所有核心的构建产物
+clean-all:
+	rm -rf ./build_*
+
+# 列出可用核心
+cores:
+	@echo "Available cores:"
+	@for d in $$(ls -d */cpu.sv 2>/dev/null | sed 's|/cpu.sv||'); do \
+		if [ "$$d" = "$(CORE)" ]; then \
+			echo "  $$d  <-- current (CORE=$$d)"; \
+		else \
+			echo "  $$d"; \
+		fi; \
+	done
+	@echo ""
+	@echo "Usage: make CORE=<name>   (default: CORE=vsrc)"
+
+.PHONY: default sim clean clean-all cores
 
 # ============================================================================
 # 5. 一生一芯全局追踪与依赖

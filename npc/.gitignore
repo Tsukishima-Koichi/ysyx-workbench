@@ -10,5 +10,5 @@
 !.gitignore
 !README.md
 !/bin/*
-build/
+build*/
 *.log

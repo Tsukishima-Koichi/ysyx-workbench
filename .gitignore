@@ -5,6 +5,7 @@
 !/npc/*
 !Makefile
 !README.md
+!*.md
 !.gitignore
 !init.sh
 !/am-kernels/*
