@@ -1,3 +1,6 @@
+# 重新编译共享库
+make SHARE=1
+
 # NEMU
 
 NEMU(NJU Emulator) is a simple but complete full-system emulator designed for teaching purpose.

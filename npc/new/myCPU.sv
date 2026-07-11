@@ -290,6 +290,11 @@ module myCPU (
         .id_forward_A(id_forward_A), .id_forward_B(id_forward_B)
     );
 
+    // A MEM2 producer is already stable while its consumer is in ID. Capture
+    // it here so the next EX cycle starts from an ID/EX register, not WB logic.
+    wire [31:0] id_rs1_capture_data = (id_forward_A == 2'b01) ? mem2_fw_data : id_rs1_data;
+    wire [31:0] id_rs2_capture_data = (id_forward_B == 2'b01) ? mem2_fw_data : id_rs2_data;
+
     // 在 ID 阶段独立且提前算好分支目标地址！
     assign id_branch_target = id_pc + id_imm;
 
@@ -301,7 +306,7 @@ module myCPU (
 
     ID_EX_Reg #(DATAWIDTH) id_ex_reg (
         .clk(cpu_clk), .rst(cpu_rst), .flush(flush_ID_EX_net), .stall(stall_EX),
-        .id_pc(id_pc), .id_rs1_data(id_rs1_data), .id_rs2_data(id_rs2_data), .id_imm(id_imm), .id_ret_pc(id_ret_pc),
+        .id_pc(id_pc), .id_rs1_data(id_rs1_capture_data), .id_rs2_data(id_rs2_capture_data), .id_imm(id_imm), .id_ret_pc(id_ret_pc),
         .id_rd(id_inst[11:7]), .id_rs1(id_inst[19:15]), .id_rs2(id_inst[24:20]),
         .id_RegWen(id_RegWen), .id_MemWen(id_MemWen), .id_IsBranch(id_IsBranch), .id_AluSrcB(id_AluSrcB),
         .id_JmpType(id_JmpType), .id_WbSel(id_WbSel), .id_AluSrcA(id_AluSrcA),
@@ -362,13 +367,15 @@ module myCPU (
         case (ex_forward_A)
             2'b11:   fwd_rs1_comb = mem1_fw_data;
             2'b10:   fwd_rs1_comb = mem2_fw_data;
-            2'b01:   fwd_rs1_comb = wb_data;
+            // MEM2 data selected in ID was captured in ex_rs1_data.
+            2'b01:   fwd_rs1_comb = ex_rs1_data;
             default: fwd_rs1_comb = ex_rs1_data;
         endcase
         case (ex_forward_B)
             2'b11:   fwd_rs2_comb = mem1_fw_data;
             2'b10:   fwd_rs2_comb = mem2_fw_data;
-            2'b01:   fwd_rs2_comb = wb_data;
+            // MEM2 data selected in ID was captured in ex_rs2_data.
+            2'b01:   fwd_rs2_comb = ex_rs2_data;
             default: fwd_rs2_comb = ex_rs2_data;
         endcase
         case (ex_forward_A)

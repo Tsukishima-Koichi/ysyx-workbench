@@ -37,7 +37,7 @@ module MDU (
 
     // 为 DSP 的输入和输出显式声明寄存器
     logic signed [32:0] mul_a_reg, mul_b_reg;
-    logic [63:0]        mul_res_reg;
+    (* DONT_TOUCH = "TRUE" *) logic [63:0] mul_res_reg;
     (* use_dsp = "yes" *) wire signed [65:0] mul_res_64 = mul_a_reg * mul_b_reg;
     
     // 采用状态机控制，防止 EX 阶段持续发出的 start 导致重复触发
@@ -88,6 +88,7 @@ module MDU (
     logic [63:0] shift_reg;
     logic [31:0] div_b;
     logic [31:0] div_orig_a;
+    logic [31:0] div_res_reg;
     logic [5:0]  count;
     logic div_sign_quo, div_sign_rem;
     
@@ -98,12 +99,16 @@ module MDU (
     state_t state;
 
     wire [32:0] diff = shift_reg[63:31] - {1'b0, div_b};
+    wire [31:0] final_quo = (div_b == 0) ? 32'hFFFFFFFF : (div_sign_quo ? -shift_reg[31:0] : shift_reg[31:0]);
+    wire [31:0] final_rem = (div_b == 0) ? div_orig_a : (div_sign_rem ? -shift_reg[63:32] : shift_reg[63:32]);
+    wire [31:0] div_res = op_funct3[1] ? final_rem : final_quo;
 
     always_ff @(posedge clk) begin
         if (rst) begin
             state <= IDLE;
             div_busy <= 0;
             div_done <= 0;
+            div_res_reg <= 0;
         end else case (state)
             IDLE: begin
                 div_done <= 0;
@@ -128,6 +133,7 @@ module MDU (
                     state <= DONE_ST;
                     div_busy <= 0;
                     div_done <= 1;
+                    div_res_reg <= div_res;
                 end else begin
                     if (diff[32] == 1'b0) begin
                         shift_reg <= {diff[31:0], shift_reg[30:0], 1'b1};
@@ -149,15 +155,12 @@ module MDU (
         endcase
     end
     
-    wire [31:0] final_quo = (div_b == 0) ? 32'hFFFFFFFF : (div_sign_quo ? -shift_reg[31:0] : shift_reg[31:0]);
-    wire [31:0] final_rem = (div_b == 0) ? div_orig_a : (div_sign_rem ? -shift_reg[63:32] : shift_reg[63:32]);
-
-    wire [31:0] div_res = (op_funct3[1]) ? final_rem : final_quo;
-    
     // ==========================================
     // 3. 握手信号与结果路由 (修改最后这部分)
     // ==========================================
-    assign result = op_is_div ? div_res : mul_res;
+    // Keep the iterative divider and sign-correction carry chain out of the
+    // forwarding network. The result is registered before done releases EX.
+    assign result = op_is_div ? div_res_reg : mul_res;
     
     // 彻底切断 busy 环路，仅依赖 done 信号来控制流水线放行！
     assign busy = op_is_div ? div_busy : 1'b0;
