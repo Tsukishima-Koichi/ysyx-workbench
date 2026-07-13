@@ -39,15 +39,25 @@ module ACTL(
     assign base_ctrl[1] = use_funct3 & ( (funct3 === 3'b001) | (funct3 === 3'b010) | (funct3 === 3'b101) );
     assign base_ctrl[0] = use_funct3 & ( is_sub | (funct3 === 3'b010) | (funct3 === 3'b100) | is_sra | (funct3 === 3'b111) );
 
-    // ★ 扩展编码 (每 bit 宽 OR)
-    // 10=ROL(01010) 11=ROR/RORI(01011) 12=MIN(01100) 13=MAX(01101)
-    // 14=MINU(01110) 15=MAXU(01111) 16=ZIP(10000) 17=UNZIP(10001) 18=XPERM8(10010)
-    wire [4:0] new_ctrl;
-    assign new_ctrl[4] = is_zip | is_unzip | is_xperm8;
-    assign new_ctrl[3] = is_rol | is_ror | is_rori | is_min | is_max | is_minu | is_maxu;
-    assign new_ctrl[2] = is_min | is_max | is_minu | is_maxu;
-    assign new_ctrl[1] = is_rol | is_ror | is_rori | is_minu | is_maxu | is_xperm8;
-    assign new_ctrl[0] = is_ror | is_rori | is_max | is_maxu | is_unzip;
+    // ★ 扩展编码: unique case 并行 MUX (无优先级链)
+    //    10=ROL 11=ROR/RORI 12=MIN 13=MAX 14=MINU 15=MAXU
+    //    16=ZIP 17=UNZIP 18=XPERM8
+    logic [4:0] new_ctrl;
+    always_comb begin
+        unique case (1'b1)
+            is_rol:    new_ctrl = 5'd10;
+            is_ror:    new_ctrl = 5'd11;
+            is_rori:   new_ctrl = 5'd11;
+            is_min:    new_ctrl = 5'd12;
+            is_max:    new_ctrl = 5'd13;
+            is_minu:   new_ctrl = 5'd14;
+            is_maxu:   new_ctrl = 5'd15;
+            is_zip:    new_ctrl = 5'd16;
+            is_unzip:  new_ctrl = 5'd17;
+            is_xperm8: new_ctrl = 5'd18;
+            default:   new_ctrl = 5'd0;
+        endcase
+    end
 
     assign alu_ctrl = is_new ? new_ctrl : base_ctrl;
 
