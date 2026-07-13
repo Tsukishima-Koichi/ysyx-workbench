@@ -10,6 +10,12 @@
 !.gitignore
 !README.md
 !/bin/*
+!/bin/b-ext/*
+!/bin/green/*
+!/bin/yellow/*
+!/bin/red/*
+!*.bin
+!*.coe
 build*/
 *.log
 !*.py
