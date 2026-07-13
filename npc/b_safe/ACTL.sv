@@ -6,7 +6,7 @@ module ACTL(
     input  logic [2:0] funct3,
     input  logic [6:0] funct7,
     input  logic [4:0] shamt,         // inst[24:20], Zbb/Zbkb 子指令区分
-    output logic [4:0] alu_ctrl       // ★ 5bit: 0-9基类, 10-26扩展
+    output logic [4:0] alu_ctrl       // 5bit: 0-9基类, 10-26扩展
 );
     // ================================================================
     // 1. 基础标志 (纯并行比较)
@@ -16,13 +16,13 @@ module ACTL(
     wire use_funct3 = is_R | is_I;
 
     // ================================================================
-    // 2. 基类特殊运算标志 (同 fastest, 纯并行)
+    // 2. 基类特殊运算标志 (同 fastest)
     // ================================================================
     wire is_sub = is_R & (funct3 === 3'b000) & (funct7[5] === 1'b1);
     wire is_sra = use_funct3 & (funct3 === 3'b101) & (funct7[5] === 1'b1);
 
     // ================================================================
-    // 3. ★ 扩展指令逐条检测 (17条并行 wire, 零优先级链)
+    // 3. 扩展指令逐条并行检测 (17条, 纯组合逻辑, 零优先级链)
     // ================================================================
     // Zba: 移位加
     wire is_sh1add = is_R & (funct7 === 7'b0010000) & (funct3 === 3'b010);
@@ -55,13 +55,13 @@ module ACTL(
     wire is_pack   = is_R & (funct7 === 7'b0000100) & (funct3 === 3'b100);
     wire is_packh  = is_R & (funct7 === 7'b0000100) & (funct3 === 3'b111);
 
-    // 任意扩展命中 → 1位宽 OR, 单级 LUT
+    // 任意扩展命中 → 1 级宽 OR
     wire is_any_ext = is_sh1add | is_sh2add | is_sh3add | is_bset | is_bclr | is_binv | is_bext |
                       is_andn | is_orn | is_xnor | is_sext_b | is_sext_h | is_orc_b |
                       is_rev8 | is_brev8 | is_pack | is_packh;
 
     // ================================================================
-    // 4. 基类编码 (bits[3:0] = fastest 原版布尔方程, bit[4] = 0)
+    // 4. 基类编码 bits[3:0] = fastest 原版布尔方程 (并行, 2~3级门)
     // ================================================================
     wire [4:0] base_ctrl;
     assign base_ctrl[4] = 1'b0;
@@ -71,35 +71,25 @@ module ACTL(
     assign base_ctrl[0] = use_funct3 & ( is_sub | (funct3 === 3'b010) | (funct3 === 3'b100) | is_sra | (funct3 === 3'b111) );
 
     // ================================================================
-    // 5. ★ 扩展编码 (每 bit 一条纯并行方程, 17→1 宽 OR, 同 fastest 风格)
-    //
-    //    码表 (bit4 bit3 bit2 bit1 bit0):
-    //    SH1ADD = 10 (0_1010)   BSET   = 13 (0_1101)   ANDN  = 17 (1_0001)
-    //    SH2ADD = 11 (0_1011)   BCLR   = 14 (0_1110)   ORN   = 18 (1_0010)
-    //    SH3ADD = 12 (0_1100)   BINV   = 15 (0_1111)   XNOR  = 19 (1_0011)
-    //    BEXT   = 16 (1_0000)   SEXT.B = 20 (1_0100)   SEXT.H= 21 (1_0101)
-    //    ORC.B  = 22 (1_0110)   REV8   = 23 (1_0111)   BREV8 = 24 (1_1000)
-    //    PACK   = 25 (1_1001)   PACKH  = 26 (1_1010)
+    // 5. 扩展编码: 每 bit 一条宽 OR 方程 (同 fastest 风格)
+    //    码表: SH1ADD=10 SH2ADD=11 SH3ADD=12 BSET=13 BCLR=14 BINV=15
+    //          BEXT=16   ANDN=17   ORN=18    XNOR=19 SEXT.B=20 SEXT.H=21
+    //          ORC.B=22  REV8=23   BREV8=24  PACK=25 PACKH=26
     // ================================================================
     wire [4:0] ext_ctrl;
-    // bit4 = 1 的指令: BEXT/ANDN/ORN/XNOR/SEXT.B/SEXT.H/ORC.B/REV8/BREV8/PACK/PACKH
     assign ext_ctrl[4] = is_bext | is_andn | is_orn | is_xnor | is_sext_b | is_sext_h |
                          is_orc_b | is_rev8 | is_brev8 | is_pack | is_packh;
-    // bit3 = 1 的指令: SH1ADD/SH2ADD/SH3ADD/BSET/BCLR/BINV/BREV8/PACK/PACKH
     assign ext_ctrl[3] = is_sh1add | is_sh2add | is_sh3add | is_bset | is_bclr | is_binv |
                          is_brev8 | is_pack | is_packh;
-    // bit2 = 1 的指令: SH3ADD/BCLR/BINV/BEXT/ORN/SEXT.H/ORC.B/BREV8/PACK
     assign ext_ctrl[2] = is_sh3add | is_bclr | is_binv | is_bext | is_orn | is_sext_h |
                          is_orc_b | is_brev8 | is_pack;
-    // bit1 = 1 的指令: SH2ADD/SH3ADD/BSET/BCLR/ANDN/XNOR/SEXT.B/REV8/PACK/PACKH
-    assign ext_ctrl[1] = is_sh2add | is_sh3add | is_bset | is_bclr | is_andn | is_xnor |
-                         is_sext_b | is_rev8 | is_pack | is_packh;
-    // bit0 = 1 的指令: SH1ADD/SH3ADD/BSET/BINV/BEXT/ANDN/ORN/SEXT.B/SEXT.H/ORC.B/REV8/PACK
+    assign ext_ctrl[1] = is_sh1add | is_sh2add | is_bclr | is_binv | is_orn | is_xnor |
+                         is_orc_b | is_pack | is_packh;
     assign ext_ctrl[0] = is_sh1add | is_sh3add | is_bset | is_binv | is_bext | is_andn |
                          is_orn | is_sext_b | is_sext_h | is_orc_b | is_rev8 | is_pack;
 
     // ================================================================
-    // 6. 最终输出: 单层 2:1 MUX (同 fastest 逻辑深度)
+    // 6. 最终输出: 单层 2:1 MUX
     // ================================================================
     assign alu_ctrl = is_any_ext ? ext_ctrl : base_ctrl;
 
