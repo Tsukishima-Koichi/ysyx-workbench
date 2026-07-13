@@ -71,22 +71,34 @@ module ACTL(
     assign base_ctrl[0] = use_funct3 & ( is_sub | (funct3 === 3'b010) | (funct3 === 3'b100) | is_sra | (funct3 === 3'b111) );
 
     // ================================================================
-    // 5. 扩展编码: 每 bit 一条宽 OR 方程 (同 fastest 风格)
-    //    码表: SH1ADD=10 SH2ADD=11 SH3ADD=12 BSET=13 BCLR=14 BINV=15
-    //          BEXT=16   ANDN=17   ORN=18    XNOR=19 SEXT.B=20 SEXT.H=21
-    //          ORC.B=22  REV8=23   BREV8=24  PACK=25 PACKH=26
+    // 5. 扩展编码: unique case 并行 MUX (vivado 识别 mutual exclusive → 无优先级链)
+    //    SH1ADD=10 SH2ADD=11 SH3ADD=12 BSET=13 BCLR=14 BINV=15
+    //    BEXT=16   ANDN=17   ORN=18    XNOR=19 SEXT.B=20 SEXT.H=21
+    //    ORC.B=22  REV8=23   BREV8=24  PACK=25 PACKH=26
     // ================================================================
-    wire [4:0] ext_ctrl;
-    assign ext_ctrl[4] = is_bext | is_andn | is_orn | is_xnor | is_sext_b | is_sext_h |
-                         is_orc_b | is_rev8 | is_brev8 | is_pack | is_packh;
-    assign ext_ctrl[3] = is_sh1add | is_sh2add | is_sh3add | is_bset | is_bclr | is_binv |
-                         is_brev8 | is_pack | is_packh;
-    assign ext_ctrl[2] = is_sh3add | is_bset | is_bclr | is_binv | is_bext | is_orn |
-                         is_sext_b | is_sext_h | is_orc_b | is_rev8 | is_brev8 | is_pack;
-    assign ext_ctrl[1] = is_sh1add | is_sh2add | is_bclr | is_binv | is_orn | is_xnor |
-                         is_orc_b | is_pack | is_packh;
-    assign ext_ctrl[0] = is_sh2add | is_bset | is_binv | is_andn | is_xnor |
-                         is_sext_h | is_rev8 | is_pack;
+    logic [4:0] ext_ctrl;
+    always_comb begin
+        unique case (1'b1)
+            is_sh1add: ext_ctrl = 5'd10;
+            is_sh2add: ext_ctrl = 5'd11;
+            is_sh3add: ext_ctrl = 5'd12;
+            is_bset:   ext_ctrl = 5'd13;
+            is_bclr:   ext_ctrl = 5'd14;
+            is_binv:   ext_ctrl = 5'd15;
+            is_bext:   ext_ctrl = 5'd16;
+            is_andn:   ext_ctrl = 5'd17;
+            is_orn:    ext_ctrl = 5'd18;
+            is_xnor:   ext_ctrl = 5'd19;
+            is_sext_b: ext_ctrl = 5'd20;
+            is_sext_h: ext_ctrl = 5'd21;
+            is_orc_b:  ext_ctrl = 5'd22;
+            is_rev8:   ext_ctrl = 5'd23;
+            is_brev8:  ext_ctrl = 5'd24;
+            is_pack:   ext_ctrl = 5'd25;
+            is_packh:  ext_ctrl = 5'd26;
+            default:   ext_ctrl = 5'd0;
+        endcase
+    end
 
     // ================================================================
     // 6. 最终输出: 单层 2:1 MUX
