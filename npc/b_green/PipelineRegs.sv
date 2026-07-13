@@ -103,7 +103,7 @@ module ID_EX_Reg #(parameter DATAWIDTH = 32)(
     // Control
     input  logic       id_RegWen, id_MemWen, id_IsBranch, id_AluSrcB,
     input  logic [1:0] id_JmpType, id_WbSel, id_AluSrcA,
-    input  logic [3:0] id_alu_ctrl,
+    input  logic [4:0] id_alu_ctrl,  // ★ 5bit: green 扩展
     input  logic [2:0] id_funct3,
     input  logic [1:0] id_forward_A, id_forward_B,
     input  logic       id_mem2_load_A, id_mem2_load_B,
@@ -139,7 +139,7 @@ module ID_EX_Reg #(parameter DATAWIDTH = 32)(
     output logic [4:0]           ex_rd, ex_rs1, ex_rs2,
     output logic       ex_RegWen, ex_MemWen, ex_IsBranch, ex_AluSrcB,
     output logic [1:0] ex_JmpType, ex_WbSel, ex_AluSrcA,
-    output logic [3:0] ex_alu_ctrl,
+    output logic [4:0] ex_alu_ctrl,  // ★ 5bit: green 扩展
     output logic [2:0] ex_funct3,
     output logic [1:0] ex_forward_A, ex_forward_B,
     output logic       ex_mem2_load_A, ex_mem2_load_B,

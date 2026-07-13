@@ -44,7 +44,7 @@ module myCPU (
     logic [31:0] id_imm, id_rs1_data, id_rs2_data, id_ret_pc;
     logic        id_IsBranch, id_RegWen, id_MemWen, id_AluSrcB;
     logic [1:0]  id_JmpType, id_WbSel, id_AluSrcA;
-    logic [3:0]  id_alu_ctrl;
+    logic [4:0]  id_alu_ctrl;  // ★ 5bit: green 扩展
     logic        id_CsrWen, id_CsrImmSel, id_IsEcall, id_IsEbreak, id_IsMret;
     logic [1:0]  id_CsrOp;
     logic [1:0]  id_forward_A, id_forward_B;
@@ -59,7 +59,7 @@ module myCPU (
     logic [4:0]  ex_rd, ex_rs1, ex_rs2;
     logic        ex_RegWen, ex_MemWen, ex_IsBranch, ex_AluSrcB;
     logic [1:0]  ex_JmpType, ex_WbSel, ex_AluSrcA;
-    logic [3:0]  ex_alu_ctrl;
+    logic [4:0]  ex_alu_ctrl;  // ★ 5bit: green 扩展
     logic [2:0]  ex_funct3;
     logic [11:0] ex_csr_idx;
     logic        ex_CsrWen, ex_CsrImmSel, ex_IsEcall, ex_IsEbreak, ex_IsMret;

@@ -3,6 +3,7 @@
 # 用法:
 #   make ARCH=riscv32-npc-bext                  # 编译全部
 #   make ARCH=riscv32-npc-bext run              # 编译全部 + NPC difftest 运行全部
+#   make ARCH=riscv32-npc-bext CORE=vsrc run    # 指定核心 (默认 vsrc)
 #   make ARCH=riscv32-npc-bext safe             # 只编译 safe 组
 #   make ARCH=riscv32-npc-bext run-safe         # 编译 + 运行 safe 组
 #   make ARCH=riscv32-npc-bext zba_sh1add       # 编译一条
@@ -29,6 +30,8 @@ RED    = $(notdir $(basename $(shell find tests/red -name "*.c" 2>/dev/null)))
 
 WS_ROOT  = $(abspath ../../..)
 NPC_DIR  = $(WS_ROOT)/npc
+CORE     ?= vsrc
+NPC_BIN  = $(NPC_DIR)/build_$(CORE)/cpu
 TIMEOUT  ?= 8
 
 # ======================= 编译 =======================
@@ -69,7 +72,7 @@ Makefile.%:
 define RUN_ONE
 run-$(1): $(1)
 	@bin="$$(pwd)/build/$(1)-riscv32-npc-bext.bin"; \
-	result=$$$$(cd $(NPC_DIR) && timeout $(TIMEOUT) ./build/cpu "$$$$bin" 2>&1); \
+	result=$$$$(cd $(NPC_DIR) && timeout $(TIMEOUT) $(NPC_BIN) "$$$$bin" 2>&1); \
 	if   echo "$$$$result" | grep -q 'GOOD TRAP';      then printf "[$(1)] $(COLOR_GREEN)PASS$(COLOR_NONE)\n"; \
 	elif echo "$$$$result" | grep -q 'DiffTest Error';  then printf "[$(1)] $(COLOR_RED)FAIL (difftest)$(COLOR_NONE)\n"; \
 	elif echo "$$$$result" | grep -q 'BAD TRAP';        then printf "[$(1)] $(COLOR_RED)FAIL (bad trap)$(COLOR_NONE)\n"; \
@@ -93,7 +96,7 @@ _run_tests:
 	for t in $(TESTS); do \
 		bin="$$self/build/$$t-riscv32-npc-bext.bin"; \
 		if [ ! -f "$$bin" ]; then printf "[$$t] SKIP (no bin)\n"; continue; fi; \
-		cd $(NPC_DIR) && result=$$(timeout $(TIMEOUT) ./build/cpu "$$bin" 2>&1); \
+		cd $(NPC_DIR) && result=$$(timeout $(TIMEOUT) $(NPC_BIN) "$$bin" 2>&1); \
 		if   echo "$$result" | grep -q 'GOOD TRAP';      then printf "[$$t] $(COLOR_GREEN)PASS$(COLOR_NONE)\n"; passed=$$((passed+1)); \
 		elif echo "$$result" | grep -q 'DiffTest Error';  then printf "[$$t] $(COLOR_RED)FAIL$(COLOR_NONE)\n"; failed=$$((failed+1)); failed_list="$$failed_list $$t"; \
 		elif echo "$$result" | grep -q 'BAD TRAP';        then printf "[$$t] $(COLOR_RED)FAIL$(COLOR_NONE)\n"; failed=$$((failed+1)); failed_list="$$failed_list $$t"; \
@@ -122,8 +125,9 @@ help:
 	@echo "  Red   ($(words $(RED))): $(RED)"
 	@echo ""
 	@echo "Usage:"
-	@echo "  make ARCH=riscv32-npc-bext run       全部编译 + 运行"
-	@echo "  make ARCH=riscv32-npc-bext run-safe   只运行 Safe  组"
+	@echo "  make ARCH=riscv32-npc-bext run        全部编译 + 运行"
+	@echo "  make ARCH=riscv32-npc-bext CORE=vsrc run  指定核心运行 (默认 vsrc)"
+	@echo "  make ARCH=riscv32-npc-bext run-safe    只运行 Safe  组"
 	@echo "  make ARCH=riscv32-npc-bext run-green  只运行 Green 组"
 	@echo "  make ARCH=riscv32-npc-bext run-yellow 只运行 Yellow 组"
 	@echo "  make ARCH=riscv32-npc-bext run-red    只运行 Red   组"
