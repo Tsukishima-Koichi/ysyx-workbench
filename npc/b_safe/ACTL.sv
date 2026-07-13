@@ -81,12 +81,12 @@ module ACTL(
                          is_orc_b | is_rev8 | is_brev8 | is_pack | is_packh;
     assign ext_ctrl[3] = is_sh1add | is_sh2add | is_sh3add | is_bset | is_bclr | is_binv |
                          is_brev8 | is_pack | is_packh;
-    assign ext_ctrl[2] = is_sh3add | is_bclr | is_binv | is_bext | is_orn | is_sext_h |
-                         is_orc_b | is_brev8 | is_pack;
+    assign ext_ctrl[2] = is_sh3add | is_bset | is_bclr | is_binv | is_bext | is_orn |
+                         is_sext_b | is_sext_h | is_orc_b | is_rev8 | is_brev8 | is_pack;
     assign ext_ctrl[1] = is_sh1add | is_sh2add | is_bclr | is_binv | is_orn | is_xnor |
                          is_orc_b | is_pack | is_packh;
-    assign ext_ctrl[0] = is_sh1add | is_sh3add | is_bset | is_binv | is_bext | is_andn |
-                         is_orn | is_sext_b | is_sext_h | is_orc_b | is_rev8 | is_pack;
+    assign ext_ctrl[0] = is_sh2add | is_bset | is_binv | is_andn | is_xnor |
+                         is_sext_h | is_rev8 | is_pack;
 
     // ================================================================
     // 6. 最终输出: 单层 2:1 MUX
