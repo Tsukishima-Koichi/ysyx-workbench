@@ -24,41 +24,31 @@ module ALU#(
     assign slt_res     = (A[MSB] != B[MSB]) ? A[MSB] : addsub_res[MSB];
     assign sltu_res    = ~addsub_ext[DATAWIDTH];
 
-    // ============================================================
-    // Zbb / Zbkx 组合逻辑 (与原有通路并行, 不插入任何流水级)
-    // ============================================================
-
-    // --- CLZ: count leading zeros ---
-    // 从 LSB 向 MSB 遍历, 阻塞赋值保证最后命中的是最高置位 bit
+    // --- CLZ ---
     logic [5:0] clz_result;
     always_comb begin
         clz_result = 6'd32;
-        for (int i = 0; i < 32; i++) begin
+        for (int i = 0; i < 32; i++)
             if (A[i]) clz_result = 6'd31 - 6'(i[4:0]);
-        end
     end
 
-    // --- CTZ: count trailing zeros ---
-    // 从 MSB 向 LSB 遍历, 阻塞赋值保证最后命中的是最低置位 bit
+    // --- CTZ ---
     logic [5:0] ctz_result;
     always_comb begin
         ctz_result = 6'd32;
-        for (int i = 31; i >= 0; i--) begin
+        for (int i = 31; i >= 0; i--)
             if (A[i]) ctz_result = 6'(i[4:0]);
-        end
     end
 
-    // --- CPOP: population count (加法器树, 综合器自动优化) ---
+    // --- CPOP ---
     logic [5:0] cpop_result;
     always_comb begin
         cpop_result = 6'd0;
-        for (int i = 0; i < 32; i++) begin
+        for (int i = 0; i < 32; i++)
             cpop_result = cpop_result + {5'b0, A[i]};
-        end
     end
 
-    // --- XPERM4: nibble permutation ---
-    // B 的每 4-bit 选择一个 A 的 nibble 放到对应位置
+    // --- XPERM4 ---
     logic [31:0] xperm4_result;
     always_comb begin
         for (int i = 0; i < 8; i++) begin
@@ -76,9 +66,6 @@ module ALU#(
         end
     end
 
-    // ============================================================
-    // 最终结果选择 (与原有 case 合并, 新增 4 个条目)
-    // ============================================================
     always_comb begin
         case (ALUControl)
             4'd0:  Result = addsub_res;                             // ADD

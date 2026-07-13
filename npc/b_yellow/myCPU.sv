@@ -293,8 +293,8 @@ module myCPU (
 
     ACTL actl_inst (
         .opcode   (id_inst[6:0]), .funct3 (id_inst[14:12]), .funct7 (id_inst[31:25]),
-        .shamt    (id_inst[24:20]),  // ★ Zbb: 区分子指令 (clz/ctz/cpop)
         .alu_ctrl (id_alu_ctrl)
+        .shamt    (id_inst[24:20]),  // ★ Zbb 子指令区分
     );
 
     ForwardingUnit fw_inst (

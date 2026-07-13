@@ -1,12 +1,12 @@
 `timescale 1ns / 1ps
 
 module ALU#(
-    parameter DATAWIDTH = 32	
+    parameter DATAWIDTH = 32
 )(
     input  logic [DATAWIDTH - 1:0]  A           ,
     input  logic [DATAWIDTH - 1:0]  B           ,
     input  logic [3:0]              ALUControl  ,
-    output logic [DATAWIDTH - 1:0]  Result      
+    output logic [DATAWIDTH - 1:0]  Result
 );
 
     localparam int MSB = DATAWIDTH - 1;
@@ -17,24 +17,23 @@ module ALU#(
     logic [DATAWIDTH-1:0] addsub_res;
     logic slt_res, sltu_res;
 
-    // ---- CLMUL carry-less multiplication (纯组合逻辑) ----
-    function automatic [63:0] clmul_64(input [31:0] a, b);
-        automatic logic [63:0] result;
-        result = 64'b0;
-        for (int i = 0; i < 32; i++) begin
-            if (a[i]) result = result ^ ({32'b0, b} << i);
-        end
-        return result;
-    endfunction
-    wire [63:0] clmul_full;
-    assign clmul_full = clmul_64(A, B);
-
     assign is_sub_like = (ALUControl == 4'd1) || (ALUControl == 4'd3) || (ALUControl == 4'd4);
     assign addsub_b    = B ^ {DATAWIDTH{is_sub_like}};
     assign addsub_ext  = {1'b0, A} + {1'b0, addsub_b} + {{DATAWIDTH{1'b0}}, is_sub_like};
     assign addsub_res  = addsub_ext[DATAWIDTH-1:0];
     assign slt_res     = (A[MSB] != B[MSB]) ? A[MSB] : addsub_res[MSB];
     assign sltu_res    = ~addsub_ext[DATAWIDTH];
+
+    // ---- CLMUL carry-less multiplication ----
+    function automatic [63:0] clmul_64(input [31:0] a, b);
+        automatic logic [63:0] result;
+        result = 64'b0;
+        for (int i = 0; i < 32; i++)
+            if (a[i]) result = result ^ ({32'b0, b} << i);
+        return result;
+    endfunction
+    wire [63:0] clmul_full;
+    assign clmul_full = clmul_64(A, B);
 
     always_comb begin
         case (ALUControl)
