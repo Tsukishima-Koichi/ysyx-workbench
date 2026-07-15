@@ -24,6 +24,7 @@ module perf_counters (
     // ---- 停顿/冲刷 ----
     input  logic        load_use_flush_id_ex,
     input  logic        stall_req_mdu,
+    input  logic        ex_mispredict,
     input  logic        redirect_flush,
 
     // ---- 预测取指空泡 ----
@@ -39,6 +40,7 @@ module perf_counters (
     logic [31:0] perf_retired;
     logic [31:0] perf_load_stall;
     logic [31:0] perf_mdu_stall;
+    logic [31:0] perf_mispredict;
     logic [31:0] perf_redirect_flush;
     logic [31:0] perf_lw_count;
     logic [31:0] perf_lb_lh_count;
@@ -62,6 +64,7 @@ module perf_counters (
             perf_retired          <= 32'd0;
             perf_load_stall       <= 32'd0;
             perf_mdu_stall        <= 32'd0;
+            perf_mispredict       <= 32'd0;
             perf_redirect_flush   <= 32'd0;
             perf_lw_count         <= 32'd0;
             perf_lb_lh_count      <= 32'd0;
@@ -75,6 +78,7 @@ module perf_counters (
             if (wb_valid)             perf_retired <= perf_retired + 32'd1;
             if (load_use_flush_id_ex) perf_load_stall <= perf_load_stall + 32'd1;
             if (stall_req_mdu)        perf_mdu_stall <= perf_mdu_stall + 32'd1;
+            if (ex_mispredict)        perf_mispredict <= perf_mispredict + 32'd1;
             if (redirect_flush)       perf_redirect_flush <= perf_redirect_flush + 32'd1;
             if (wb_is_lw)             perf_lw_count <= perf_lw_count + 32'd1;
             if (wb_is_lb_lh)          perf_lb_lh_count <= perf_lb_lh_count + 32'd1;
@@ -95,7 +99,7 @@ module perf_counters (
             1:  return perf_retired;
             2:  return perf_load_stall;
             3:  return perf_mdu_stall;
-            4:  return perf_redirect_flush;
+            4:  return perf_mispredict;
             5:  return perf_lw_count;
             6:  return perf_lb_lh_count;
             7:  return perf_load_use_hazard;
@@ -103,6 +107,7 @@ module perf_counters (
             9:  return perf_min_sp;
             10: return perf_max_dram_addr;
             11: return perf_pred_taken_bubble;
+            12: return perf_redirect_flush;
             default: return 0;
         endcase
     endfunction

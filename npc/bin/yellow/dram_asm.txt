@@ -1,0 +1,16 @@
+
+yellow/dram.bin:     file format binary
+
+
+Disassembly of section .data:
+
+00000000 <.data>:
+	...
+   c:	abcd                	j	0x5fe
+   e:	1234                	addi	a3,sp,296
+  10:	7788                	ld	a0,40(a5)
+  12:	5566                	lw	a0,120(sp)
+	...
+  1c:	00ff ff00 0000 0000 	.insn	10, 0xff0000ff
+  24:	0000 
+	...

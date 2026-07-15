@@ -84,8 +84,8 @@ VERILATOR_CFLAGS += -Wall -Wno-fatal --sv -MMD --build -cc -O3 \
 # 4. 核心编译与运行规则
 # ============================================================================
 # 新增：定义默认的 bin 文件路径和起始地址 (?= 表示可被终端环境变量覆盖)
-IROM_BIN  ?= ./bin/red/irom.bin
-DRAM_BIN  ?= ./bin/red/dram.bin
+IROM_BIN  ?= ./bin/coe/sh2add/irom.bin
+DRAM_BIN  ?= ./bin/withMext/dram.bin
 DRAM_ADDR ?= 80100000
 
 # 默认目标设为 sim

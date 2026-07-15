@@ -1,16 +1,14 @@
-# Makefile for B-Extension Per-Instruction Tests
+# Makefile for B-Extension Per-Instruction Tests (39 total)
 #
 # 用法:
 #   make ARCH=riscv32-npc-bext                  # 编译全部
 #   make ARCH=riscv32-npc-bext run              # 编译全部 + NPC difftest 运行全部
-#   make ARCH=riscv32-npc-bext CORE=vsrc run    # 指定核心 (默认 vsrc)
-#   make ARCH=riscv32-npc-bext safe             # 只编译 safe 组
-#   make ARCH=riscv32-npc-bext run-safe         # 编译 + 运行 safe 组
+#   make ARCH=riscv32-npc-bext CORE=vsrc run    # 指定核心
 #   make ARCH=riscv32-npc-bext zba_sh1add       # 编译一条
 #   make ARCH=riscv32-npc-bext run-zba_sh1add   # 编译 + 运行一条
 #   make clean
 
-.PHONY: all run clean help safe green yellow red run-safe run-green run-yellow run-red
+.PHONY: all run clean help
 
 RESULT_FILE = .result
 
@@ -21,12 +19,6 @@ COLOR_NONE   = \033[0m
 
 ALL_TESTS = $(notdir $(basename $(shell find tests/. -name "*.c" 2>/dev/null)))
 TOTAL     = $(words $(ALL_TESTS))
-
-# 分类: safe / green / yellow / red
-SAFE   = $(notdir $(basename $(shell find tests/safe -name "*.c" 2>/dev/null)))
-GREEN  = $(notdir $(basename $(shell find tests/green -name "*.c" 2>/dev/null)))
-YELLOW = $(notdir $(basename $(shell find tests/yellow -name "*.c" 2>/dev/null)))
-RED    = $(notdir $(basename $(shell find tests/red -name "*.c" 2>/dev/null)))
 
 WS_ROOT  = $(abspath ../../..)
 NPC_DIR  = $(WS_ROOT)/npc
@@ -49,11 +41,6 @@ all: $(addprefix Makefile., $(ALL_TESTS))
 		printf "$(COLOR_GREEN)%d compiled$(COLOR_NONE), $(COLOR_RED)%d failed$(COLOR_NONE)\n" $$passed $$failed; \
 	fi
 	@rm -f $(RESULT_FILE)
-
-safe: $(addprefix Makefile., $(SAFE))
-green: $(addprefix Makefile., $(GREEN))
-yellow: $(addprefix Makefile., $(YELLOW))
-red: $(addprefix Makefile., $(RED))
 
 $(ALL_TESTS): %: Makefile.%
 
@@ -82,18 +69,12 @@ endef
 
 $(foreach t,$(ALL_TESTS),$(eval $(call RUN_ONE,$(t))))
 
-# ======================= 运行全部 / 按组 =======================
-run:      all;     @$(MAKE) _run_tests TESTS="$(ALL_TESTS)"
-run-safe: safe;    @$(MAKE) _run_tests TESTS="$(SAFE)"
-run-green: green;  @$(MAKE) _run_tests TESTS="$(GREEN)"
-run-yellow: yellow; @$(MAKE) _run_tests TESTS="$(YELLOW)"
-run-red:  red;     @$(MAKE) _run_tests TESTS="$(RED)"
-
-_run_tests:
+# ======================= 运行全部 =======================
+run: all
 	@echo ""
 	@echo "========== NPC Difftest Results =========="
 	@passed=0; failed=0; failed_list=""; self=$$(pwd); \
-	for t in $(TESTS); do \
+	for t in $(ALL_TESTS); do \
 		bin="$$self/build/$$t-riscv32-npc-bext.bin"; \
 		if [ ! -f "$$bin" ]; then printf "[$$t] SKIP (no bin)\n"; continue; fi; \
 		cd $(NPC_DIR) && result=$$(timeout $(TIMEOUT) $(NPC_BIN) "$$bin" 2>&1); \
@@ -119,17 +100,12 @@ clean:
 help:
 	@echo "B-Extension Tests ($(TOTAL) tests)"
 	@echo ""
-	@echo "  Safe  ($(words $(SAFE))): $(SAFE)"
-	@echo "  Green ($(words $(GREEN))): $(GREEN)"
-	@echo "  Yellow($(words $(YELLOW))): $(YELLOW)"
-	@echo "  Red   ($(words $(RED))): $(RED)"
+	@echo "Tests:"
+	@for t in $(ALL_TESTS); do echo "  $$t"; done | sort | column
 	@echo ""
 	@echo "Usage:"
 	@echo "  make ARCH=riscv32-npc-bext run        全部编译 + 运行"
-	@echo "  make ARCH=riscv32-npc-bext CORE=vsrc run  指定核心运行 (默认 vsrc)"
-	@echo "  make ARCH=riscv32-npc-bext run-safe    只运行 Safe  组"
-	@echo "  make ARCH=riscv32-npc-bext run-green  只运行 Green 组"
-	@echo "  make ARCH=riscv32-npc-bext run-yellow 只运行 Yellow 组"
-	@echo "  make ARCH=riscv32-npc-bext run-red    只运行 Red   组"
+	@echo "  make ARCH=riscv32-npc-bext CORE=vsrc run  指定核心"
 	@echo "  make ARCH=riscv32-npc-bext zba_sh1add 编译一条"
 	@echo "  make ARCH=riscv32-npc-bext run-zba_sh1add 编译+运行一条"
+	@echo "  make clean"

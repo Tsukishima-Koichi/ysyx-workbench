@@ -5,6 +5,7 @@ module BranchPredictor #(
     parameter INDEX_BITS = 10 // 升级到 1024 项表！BRAM 毫无压力
 )(
     input  logic                clk,
+    input  logic                stall,
     
     // --- IF1 阶段发送查询地址 ---
     input  logic [PC_WIDTH-1:0] if1_pc,
@@ -41,7 +42,7 @@ module BranchPredictor #(
 
     // Pipeline predictor training to remove the long EX -> BHT write-data path.
     logic                           update_valid;
-    logic [INDEX_BITS-1:0]          update_idx;
+    (* MAX_FANOUT = 64 *) logic [INDEX_BITS-1:0] update_idx;
     logic [PC_WIDTH-INDEX_BITS-3:0] update_tag;
     logic                           update_taken;
     logic [PC_WIDTH-1:0]            update_target;
@@ -92,11 +93,13 @@ module BranchPredictor #(
     // 1. 同步读取机制 (推断 BRAM 的关键)
     // ----------------------------------------
     always_ff @(posedge clk) begin
-        // 注意：这里绝对不能加 if(rst) 清零，否则 BRAM 推断失败！
-        read_tag    <= btb_tag[if1_idx];
-        read_target <= btb_target[if1_idx];
-        read_valid  <= btb_valid[if1_idx];
-        read_bht    <= bht_counter[if1_idx];
+        // Keep the predictor response aligned with a held IF2 pipeline entry.
+        if (!stall) begin
+            read_tag    <= btb_tag[if1_idx];
+            read_target <= btb_target[if1_idx];
+            read_valid  <= btb_valid[if1_idx];
+            read_bht    <= bht_counter[if1_idx];
+        end
     end
 
     // ----------------------------------------
@@ -110,7 +113,7 @@ module BranchPredictor #(
     // ----------------------------------------
     // 3. EX 阶段更新逻辑
     // ----------------------------------------
-    always_ff @(posedge clk) begin
+    always @(posedge clk) begin
         update_valid     <= ex_is_branch;
         update_idx       <= ex_idx;
         update_tag       <= ex_tag;
